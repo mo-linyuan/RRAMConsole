@@ -87,12 +87,50 @@ class ExecutionSafetyTest(unittest.TestCase):
             self.assertIn((0, "失败"), events.states)
 
     def test_raw_and_template_ready_both_await_reply(self):
+        from i1003.ui.templates import TEMPLATES
+        template = next(t for t in TEMPLATES if t.name == "查询芯片 Ready 0002")
         with peer(lambda data: [bytes(7) + b"\x01"]) as (link, received, events, _):
-            ok, runner, _ = self.run_items(link, [RawItem(hex=fpga.read_frame(2).hex()), FpgaItem(addr=2)])
+            ok, runner, _ = self.run_items(link, [RawItem(hex=fpga.read_frame(2).hex()), template.make()])
             self.assertTrue(ok)
             self.assertEqual(runner.last_result.sent, 2)
             self.assertEqual([kind for kind, _ in events], ["bit", "bit"])
             self.assertEqual(received[0], received[1])
+
+    def test_board_templates_accept_builtin_address_enums(self):
+        from i1003.ui.templates import TEMPLATES
+        for template in (t for t in TEMPLATES if t.group == "板卡"):
+            options = ("读", "写 0", "写 1") if template.fields else (None,)
+            for option in options:
+                with self.subTest(template=template.name, option=option):
+                    item = template.make({"op": option} if option else None)
+                    item.validate()
+                    self.assertEqual(len(item.frames(R)[0][0]), 12)
+
+    def test_invalid_fpga_addresses_still_rejected(self):
+        for addr in (-1, 32768, 2.0, "2", True, None):
+            with self.subTest(addr=addr), self.assertRaises(ValueError):
+                FpgaItem(addr=addr).validate()
+        for addr in (0, 32767, *fpga.Addr):
+            FpgaItem(addr=addr).validate()
+
+    def test_real_path_check_preset_executes_with_enum_address(self):
+        from i1003.recipes.write_test import path_check
+        registers = {}
+        def respond(data):
+            write, addr, payload = fpga.parse_frame(data)
+            if not write:
+                return [bytes(7) + b"\x01"]
+            pkg = Pkg.decode(payload)
+            if pkg.type == 4:
+                registers[pkg.addr] = pkg.data
+                return []
+            return [reply_to(data, data=registers.get(pkg.addr, 0))]
+        with peer(respond) as (link, received, _, _):
+            ok, runner, _ = self.run_items(link, path_check())
+            self.assertTrue(ok)
+            self.assertEqual(runner.last_result.sent, 3)
+            self.assertEqual(received[0], fpga.read_frame(fpga.Addr.CHIP_READY))
+            self.assertEqual(runner.last_result.outcome, "checked")
 
     def test_plain_chip_read_awaits_chip_reply(self):
         with peer(lambda data: [reply_to(data, data=7)]) as (link, _, events, _):

@@ -57,7 +57,7 @@ class FpgaItem(Item):
     kind = "fpga"
 
     def validate(self):
-        if type(self.addr) is not int or not 0 <= self.addr <= 0x7FFF:
+        if not isinstance(self.addr, int) or isinstance(self.addr, bool) or not 0 <= self.addr <= 0x7FFF:
             raise ValueError("FPGA 地址必须为 0～32767")
         if type(self.data) is not int or not 0 <= self.data < 2**64:
             raise ValueError("FPGA 数据必须为 64 位无符号整数")
