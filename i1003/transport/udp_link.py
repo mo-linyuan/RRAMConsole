@@ -1,112 +1,147 @@
-"""UDP 收发。只负责字节进出和"请求-回包"配对，不涉及界面和业务流程。
-
-回包分三类，通过 on_receive(kind, data) 交给上层：
-  "bit"  0001/0002/0004 这类单比特寄存器的回包
-  "fpga" 0003 读回 FPGA 存值
-  "chip" 其他：没有对应请求、自己到达的包，通常来自芯片
-"""
-
+﻿"""Serialized, cancellable UDP requests. No transaction IDs exist on the wire."""
 from __future__ import annotations
-
 import socket
 import threading
 import time
-from typing import Callable, Optional
-
 from ..protocol import fpga
-
-SendHook = Callable[[bytes, str, bool], None]          # (数据, 备注, 是否 Ready 查询)
-ReceiveHook = Callable[[str, bytes], None]             # (类别, 数据)
+from ..protocol.pkg import Pkg
 
 
 class UdpLink:
-    def __init__(self, on_send: Optional[SendHook] = None, on_receive: Optional[ReceiveHook] = None):
+    def __init__(self, on_send=None, on_receive=None):
         self.on_send = on_send or (lambda *a: None)
         self.on_receive = on_receive or (lambda *a: None)
-        self._sock: Optional[socket.socket] = None
-        self._remote = None
-        self._running = False
+        self._sock = self._remote = self._thread = None
         self._cv = threading.Condition()
-        self._waiting: Optional[str] = None
-        self._result: Optional[bytes] = None
+        self._requests = threading.Lock()
+        self._waiting = self._matcher = self._result = None
+        self._closed = threading.Event()
+        self._closed.set()
 
-    # ---------------------------------------------------------------- 连接
     @property
-    def is_open(self) -> bool:
+    def is_open(self):
         return self._sock is not None
 
-    def open(self, local_ip: str = fpga.PC_IP, local_port: int = fpga.PORT,
-             remote_ip: str = fpga.BOARD_IP, remote_port: int = fpga.PORT) -> None:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.bind((local_ip, local_port))
-        s.settimeout(0.2)
-        self._sock, self._remote, self._running = s, (remote_ip, remote_port), True
-        threading.Thread(target=self._rx_loop, name="udp-rx", daemon=True).start()
+    def open(self, local_ip=fpga.PC_IP, local_port=fpga.PORT,
+             remote_ip=fpga.BOARD_IP, remote_port=fpga.PORT):
+        if self.is_open:
+            raise RuntimeError("UDP 已打开，请先断开连接")
+        remote = (socket.gethostbyname(remote_ip), remote_port)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.bind((local_ip, local_port))
+            sock.settimeout(0.1)
+        except Exception:
+            sock.close()
+            raise
+        self._sock, self._remote = sock, remote
+        self._closed = threading.Event()
+        self._thread = threading.Thread(target=self._rx_loop, args=(sock, remote, self._closed),
+                                        name="udp-rx", daemon=True)
+        self._thread.start()
 
-    def close(self) -> None:
-        self._running = False
-        if self._sock:
-            try:
-                self._sock.close()
-            except OSError:
-                pass
-        self._sock = None
+    def cancel_pending(self):
+        with self._cv:
+            self._waiting, self._result = None, None
+            self._cv.notify_all()
 
-    # ---------------------------------------------------------------- 发送
-    def send(self, data: bytes, note: str = "", quiet: bool = False) -> None:
-        if not self._sock:
+    def close(self):
+        self._closed.set()
+        sock, self._sock = self._sock, None
+        self.cancel_pending()
+        if sock is not None:
+            sock.close()
+        if self._thread and self._thread is not threading.current_thread():
+            self._thread.join(timeout=0.3)
+
+    def send(self, data, note="", quiet=False):
+        sock = self._sock
+        if sock is None:
             raise RuntimeError("UDP 未连接")
-        self._sock.sendto(data, self._remote)
+        sock.sendto(data, self._remote)
         self.on_send(data, note, quiet)
 
-    def request(self, expect: str, data: bytes, timeout: float, note: str = "", quiet: bool = False) -> Optional[bytes]:
-        """发送并等待一个指定类别（bit / fpga / chip）的回包，超时返回 None。"""
-        with self._cv:
-            self._waiting, self._result = expect, None
-        self.send(data, note, quiet)
-        with self._cv:
-            self._cv.wait_for(lambda: self._waiting is None, timeout)
-            r, self._waiting = self._result, None
-        return r
+    @staticmethod
+    def _reply_matcher(expect, request):
+        if expect == "bit":
+            return fpga.looks_like_bit_reply
+        if expect == "fpga":
+            return lambda data: len(data) == fpga.REPLY_LEN
+        if expect != "chip":
+            raise ValueError("未知回包类别：" + expect)
+        write, addr, payload = fpga.parse_frame(request)
+        if not write or addr != fpga.Addr.NOC_OUT:
+            raise ValueError("芯片读请求必须封装为写 FPGA 地址 3")
+        sent = Pkg.decode(payload)
+        if not 0 <= sent.type <= 3:
+            raise ValueError("仅芯片读命令可以等待读回包")
 
-    def read_bit(self, addr: int, note: str = "", quiet: bool = False, timeout: float = 0.3) -> Optional[int]:
-        r = self.request("bit", fpga.read_frame(addr), timeout, note, quiet)
-        return None if r is None else r[7] & 1
+        def matches(data):
+            if len(data) != fpga.REPLY_LEN:
+                return False
+            got = Pkg.decode(data)
+            return (got.type == (8 | sent.type) and got.addr == sent.addr
+                    and (got.sx, got.sy, got.dx, got.dy) == (sent.dx, sent.dy, sent.sx, sent.sy))
+        return matches
 
-    def wait_chip_ready(self, max_wait_s: float = 1.0) -> Optional[bool]:
-        """反复查 0002，直到芯片 Ready=1。返回 True；一直为 0 返回 False；没有回包返回 None。"""
-        t_end = time.time() + max_wait_s
-        last = None
-        while True:
-            last = self.read_bit(fpga.Addr.CHIP_READY, "查询 Ready", quiet=True)
+    def request(self, expect, data, timeout, note="", quiet=False, cancel_event=None):
+        matcher = self._reply_matcher(expect, data)
+        with self._requests:
+            if cancel_event is not None and cancel_event.is_set():
+                return None
+            with self._cv:
+                self._waiting, self._matcher, self._result = expect, matcher, None
+            try:
+                self.send(data, note, quiet)
+                end = time.monotonic() + max(0, timeout)
+                with self._cv:
+                    while self._waiting is not None:
+                        if self._closed.is_set() or (cancel_event is not None and cancel_event.is_set()):
+                            return None
+                        left = end - time.monotonic()
+                        if left <= 0:
+                            return None
+                        self._cv.wait(min(left, 0.05))
+                    return self._result
+            finally:
+                with self._cv:
+                    self._waiting = self._matcher = self._result = None
+
+    def read_bit(self, addr, note="", quiet=False, timeout=0.3, cancel_event=None):
+        data = self.request("bit", fpga.read_frame(addr), timeout, note, quiet, cancel_event)
+        return None if data is None else data[7] & 1
+
+    def wait_chip_ready(self, max_wait_s=1.0, cancel_event=None):
+        end, last = time.monotonic() + max_wait_s, None
+        while time.monotonic() < end:
+            if cancel_event is not None and cancel_event.is_set():
+                return None
+            last = self.read_bit(fpga.Addr.CHIP_READY, "查询 Ready", quiet=True,
+                                 timeout=min(0.3, max(0, end - time.monotonic())), cancel_event=cancel_event)
             if last == 1:
                 return True
-            if time.time() >= t_end:
-                return None if last is None else False
-            time.sleep(0.005)
+            if self._closed.wait(0.005):
+                return None
+        return None if last is None else False
 
-    # ---------------------------------------------------------------- 接收
-    def _rx_loop(self) -> None:
-        while self._running:
+    def _rx_loop(self, sock, remote, closed):
+        while not closed.is_set():
             try:
-                data, _ = self._sock.recvfrom(65536)
+                data, peer = sock.recvfrom(65536)
             except socket.timeout:
                 continue
             except OSError:
                 break
+            if peer != remote:
+                self.on_receive("foreign", data)
+                continue
             self.on_receive(self._classify(data), data)
 
-    def _classify(self, d: bytes) -> str:
+    def _classify(self, data):
         with self._cv:
-            w = self._waiting
-            if w == "bit" and fpga.looks_like_bit_reply(d):
-                kind = "bit"
-            elif w == "fpga" and len(d) == fpga.REPLY_LEN:
-                kind = "fpga"
-            elif w == "chip":
-                kind = "chip"
-            else:
-                return "chip"
-            self._result, self._waiting = d, None
-            self._cv.notify_all()
-            return kind
+            if self._waiting is not None and self._matcher(data):
+                kind = self._waiting
+                self._result, self._waiting = data, None
+                self._cv.notify_all()
+                return kind
+        return "unmatched"

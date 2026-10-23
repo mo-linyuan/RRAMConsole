@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+import math
 from typing import Dict, List, Optional, Tuple, Type
 
 from ..protocol import fpga, isa
@@ -24,6 +25,9 @@ class Item:
     meta: Dict = field(default_factory=dict)      # 界面用：记录由哪个模板、什么参数生成
 
     kind = "base"
+
+    def validate(self) -> None:
+        pass
 
     def frames(self, route: Route, limit: Optional[int] = None) -> List[Frame]:
         return []
@@ -52,7 +56,16 @@ class FpgaItem(Item):
     data: int = 0
     kind = "fpga"
 
+    def validate(self):
+        if type(self.addr) is not int or not 0 <= self.addr <= 0x7FFF:
+            raise ValueError("FPGA 地址必须为 0～32767")
+        if type(self.data) is not int or not 0 <= self.data < 2**64:
+            raise ValueError("FPGA 数据必须为 64 位无符号整数")
+        if self.write and self.addr in fpga.FORBIDDEN_WRITES:
+            raise ValueError("该 FPGA 地址不允许写")
+
     def frames(self, route, limit=None):
+        self.validate()
         f = fpga.write_frame(self.addr, self.data) if self.write else fpga.read_frame(self.addr)
         return [(f, False)]
 
@@ -65,7 +78,20 @@ class PkgItem(Item):
     data: int = 0
     kind = "pkg"
 
+    def validate(self):
+        if not isinstance(self.type, int) or not 0 <= self.type <= 7:
+            raise ValueError("芯片命令 TYPE 必须为 0～7")
+        if type(self.addr) is not int or not 0 <= self.addr <= 0xFFFF:
+            raise ValueError("芯片地址必须为 16 位无符号整数")
+        if type(self.data) is not int or not 0 <= self.data <= 0xFFFFFFFF:
+            raise ValueError("芯片数据必须为 32 位无符号整数")
+        if self.type == PkgType.WRITE_INST:
+            if type(self.addr) is not int or not 0 <= self.addr < isa.INST_DEPTH:
+                raise ValueError("指令地址必须为 0～{}".format(isa.INST_DEPTH - 1))
+            isa.validate_instruction(self.data)
+
     def frames(self, route, limit=None):
+        self.validate()
         return [(fpga.chip_frame(encode(self.type, self.addr, self.data, route)), True)]
 
     def is_start(self):
@@ -81,7 +107,20 @@ class ProgItem(Item):
     stop: bool = True
     kind = "prog"
 
+    def validate(self):
+        if type(self.start) is not int or not 0 <= self.start < isa.INST_DEPTH:
+            raise ValueError("起始指令地址必须为 0～{}".format(isa.INST_DEPTH - 1))
+        count = 1 if self.stop else 0
+        for word, repeat in self.segs:
+            isa.validate_instruction(word)
+            if type(repeat) is not int or repeat < 1:
+                raise ValueError("指令重复次数必须为正整数")
+            count += repeat
+        if self.start + count > isa.INST_DEPTH:
+            raise ValueError("指令总数超过指令区容量 {} 条".format(isa.INST_DEPTH))
+
     def words(self, limit=None) -> List[int]:
+        self.validate()
         out: List[int] = []
         for w, c in self.segs:
             out.extend([w] * c)
@@ -108,6 +147,10 @@ class WaitItem(Item):
     notify: str = ""          # 开始等待时弹窗提示的内容，空则不弹
     kind = "wait"
 
+    def validate(self):
+        if not isinstance(self.ms, (int, float)) or not math.isfinite(self.ms) or self.ms < 0:
+            raise ValueError("等待时间必须为非负有限数")
+
     def count(self):
         return 0
 
@@ -117,11 +160,16 @@ class WaitItem(Item):
 
 @dataclass
 class VerifyItem(Item):
-    """发读请求，等芯片回包并核对数据。收不到回包只记录，不中止。"""
+    """Read and compare chip data; timeout or mismatch stops the task."""
     type: int = PkgType.READ_REG
     addr: int = 0
     expect: int = 0
     kind = "verify"
+
+    def validate(self):
+        PkgItem(type=self.type, addr=self.addr, data=self.expect).validate()
+        if self.type not in range(4):
+            raise ValueError("核对操作必须使用读命令")
 
     def frames(self, route, limit=None):
         return [(fpga.chip_frame(encode(self.type, self.addr, 0, route)), True)]
@@ -132,6 +180,10 @@ class PollItem(Item):
     """反复读 reg[0]，直到出现结束位或超时。"""
     timeout_s: float = 10.0
     kind = "poll"
+
+    def validate(self):
+        if not isinstance(self.timeout_s, (int, float)) or not math.isfinite(self.timeout_s) or self.timeout_s <= 0:
+            raise ValueError("查询超时必须为正有限数")
 
     def frames(self, route, limit=None):
         return [(fpga.chip_frame(encode(PkgType.READ_REG, isa.REG_STATUS, 0, route)), True)]
@@ -145,6 +197,10 @@ class RawItem(Item):
     """原样发送的字节，可以是一帧或多帧。"""
     hex: str = ""
     kind = "raw"
+
+    def validate(self):
+        if not bytes.fromhex(self.hex):
+            raise ValueError("原始报文不能为空")
 
     def frames(self, route, limit=None):
         b = bytes.fromhex(self.hex)
@@ -167,7 +223,9 @@ def from_dict(d: Dict) -> Item:
         d.update(addr=ctrl & 0x7FFF, write=bool(ctrl & 0x8000), data=int(d.get("data", "0"), 16))
     cls = KINDS[kind]
     names = set(cls.__dataclass_fields__)
-    return cls(**{k: v for k, v in d.items() if k in names})
+    item = cls(**{k: v for k, v in d.items() if k in names})
+    item.validate()
+    return item
 
 
 def total_frames(items: List[Item]) -> int:

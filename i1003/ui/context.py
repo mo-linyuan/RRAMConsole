@@ -16,6 +16,7 @@ class AppContext:
     def route(self) -> Route: raise NotImplementedError
     def is_connected(self) -> bool: raise NotImplementedError
     def is_busy(self) -> bool: raise NotImplementedError
+    def chip_family_id(self) -> str: raise NotImplementedError
 
     def run(self, items: Sequence[Item], rows: Optional[Sequence[Optional[int]]] = None,
             confirm: bool = True) -> bool:

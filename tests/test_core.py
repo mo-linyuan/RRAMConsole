@@ -87,9 +87,10 @@ class RecipeTest(unittest.TestCase):
     def test_i1000_scene(self):
         p = write_test.plan(write_test.scene("单器件长时间（I1000 实验台：4095 次）"))
         self.assertEqual(p.instructions, 4095)
-        self.assertEqual(p.wwv.cycles, 10000)                # 默认 1 ms
+        self.assertEqual(p.wwv.word, 0x00FF00FE)              # 师姐实操参数
+        self.assertEqual(p.wwv.cycles, 64770)
         self.assertEqual(p.first_word, 0x40100002)
-        self.assertAlmostEqual(p.est_s, 4.095, places=2)
+        self.assertAlmostEqual(p.est_s, 26.523315, places=6)
         p = write_test.plan(write_test.WriteTestSpec(pulse_ms=6.477))   # I1000 实验台的值
         self.assertEqual(p.wwv.word, 0x00FF00FE)
 
@@ -97,7 +98,16 @@ class RecipeTest(unittest.TestCase):
         p = write_test.plan(write_test.scene("单器件持续选通 8 s（配合 4200 测量）"))
         self.assertEqual(p.instructions, 8000)              # 1 ms × 8000
         with self.assertRaises(write_test.SpecError):
-            write_test.plan(write_test.WriteTestSpec(hold_s=9.0))      # 1 ms 下最多约 8.19 s
+            write_test.plan(write_test.WriteTestSpec(hold_s=9.0, pulse_ms=1.0))
+
+    def test_direct_wwv_fields(self):
+        p = write_test.plan(write_test.WriteTestSpec(wwv_base=13, wwv_times=17, repeat=2))
+        self.assertEqual(p.wwv.word, 0x0011000D)
+        self.assertEqual(p.items[0].data, 0x0011000D)
+        self.assertEqual(p.instructions, 2)
+        for base, times in ((0, 255), (254, 0), (256, 255), (254, 256)):
+            with self.subTest(base=base, times=times), self.assertRaises(write_test.SpecError):
+                write_test.plan(write_test.WriteTestSpec(wwv_base=base, wwv_times=times))
 
     def test_too_many(self):
         with self.assertRaises(write_test.SpecError):
@@ -138,8 +148,9 @@ class RunnerTest(unittest.TestCase):
     def test_without_chip_reply(self):
         spec = write_test.WriteTestSpec(repeat=5, pulse_ms=0.001)
         ok, ev, board = self._run(write_test.plan(spec).items, fast=False, chip_replies=False, port=9190)
-        self.assertTrue(ok)                       # 收不到芯片回包只提示，不中断
-        self.assertEqual(len(board.inst), 6)
+        self.assertFalse(ok)
+        self.assertEqual(len(board.inst), 0)       # Stop before programming or starting the core.
+        self.assertTrue(any("核对失败" in text for _, text in ev.logs))
 
 
 if __name__ == "__main__":

@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+<title>RRAM Chip Console</title>
+<rect x="74" y="28" width="12" height="34" rx="5" fill="#3b82f6"/>
+<rect x="74" y="194" width="12" height="34" rx="5" fill="#3b82f6"/>
+<rect x="28" y="74" width="34" height="12" rx="5" fill="#3b82f6"/>
+<rect x="194" y="74" width="34" height="12" rx="5" fill="#3b82f6"/>
+<rect x="106" y="28" width="12" height="34" rx="5" fill="#3b82f6"/>
+<rect x="106" y="194" width="12" height="34" rx="5" fill="#3b82f6"/>
+<rect x="28" y="106" width="34" height="12" rx="5" fill="#3b82f6"/>
+<rect x="194" y="106" width="34" height="12" rx="5" fill="#3b82f6"/>
+<rect x="138" y="28" width="12" height="34" rx="5" fill="#3b82f6"/>
+<rect x="138" y="194" width="12" height="34" rx="5" fill="#3b82f6"/>
+<rect x="28" y="138" width="34" height="12" rx="5" fill="#3b82f6"/>
+<rect x="194" y="138" width="34" height="12" rx="5" fill="#3b82f6"/>
+<rect x="170" y="28" width="12" height="34" rx="5" fill="#3b82f6"/>
+<rect x="170" y="194" width="12" height="34" rx="5" fill="#3b82f6"/>
+<rect x="28" y="170" width="34" height="12" rx="5" fill="#3b82f6"/>
+<rect x="194" y="170" width="34" height="12" rx="5" fill="#3b82f6"/>
+<rect x="56" y="56" width="144" height="144" rx="24" fill="#2563eb"/>
+<rect x="72" y="72" width="112" height="112" rx="12" fill="white"/>
+<rect x="88" y="88" width="16" height="16" rx="3" fill="#2563eb"/>
+<rect x="120" y="88" width="16" height="16" rx="3" fill="#2563eb"/>
+<rect x="152" y="88" width="16" height="16" rx="3" fill="#2563eb"/>
+<rect x="88" y="120" width="16" height="16" rx="3" fill="#2563eb"/>
+<rect x="120" y="120" width="16" height="16" rx="3" fill="#2563eb"/>
+<rect x="152" y="120" width="16" height="16" rx="3" fill="#2563eb"/>
+<rect x="88" y="152" width="16" height="16" rx="3" fill="#2563eb"/>
+<rect x="120" y="152" width="16" height="16" rx="3" fill="#2563eb"/>
+<rect x="152" y="152" width="16" height="16" rx="3" fill="#2563eb"/>
+</svg>

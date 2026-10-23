@@ -8,6 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Tuple
 
+from rram_console.hardware import RRAM_ARRAY
+
 CHIP_CLK_HZ = 10_000_000      # FPGA clk_pll clk_out6 → clk_sys_rram
 INST_DEPTH = 8192             # 每个核的指令存储器 8192×32
 STOP_INST = 0x70F00000        # CTRL 00000000 15：指令序列结束
@@ -31,6 +33,7 @@ def writeb(pe: int, set_: bool, rram_idx: int, cell_addr: int) -> int:
     """WRITEB：opcode 0100 | PE[27:24] | TYPE[23:20]（1 SET，0 RESET）| RRAM INDEX[19:16] | 地址[15:0]"""
     if not (0 <= pe <= 7 and 0 <= rram_idx <= 7):
         raise ValueError("PE 和阵列都是 0 到 7")
+    CellEncoding.validate_address(cell_addr)
     return ((OPCODE_WRITEB << 28) | (pe << 24) | ((1 if set_ else 0) << 20) | (rram_idx << 16)
             | (cell_addr & 0xFFFF))
 
@@ -43,9 +46,44 @@ class CellEncoding:
 
     @staticmethod
     def encode(name: str, row: int, col: int) -> int:
-        if not (0 <= row <= 127 and 0 <= col <= 127):
-            raise ValueError("行、列都是 0 到 127")
-        return row * 128 + col if name == CellEncoding.ROW_X128 else (row << 8) | col
+        RRAM_ARRAY.validate_cell(row, col)
+        if name not in CellEncoding.ALL:
+            raise ValueError("未知的器件地址编码：{}".format(name))
+        return row * RRAM_ARRAY.columns + col if name == CellEncoding.ROW_X128 else (row << 8) | col
+
+    @staticmethod
+    def decode(name: str, address: int) -> Tuple[int, int]:
+        if type(address) is not int or not 0 <= address <= 0xFFFF:
+            raise ValueError("器件地址必须为 16 位非负整数")
+        if name == CellEncoding.ROW_X128:
+            row, col = divmod(address, RRAM_ARRAY.columns)
+        elif name == CellEncoding.ROW_SHIFT8:
+            row, col = address >> 8, address & 0xFF
+        else:
+            raise ValueError("未知的器件地址编码：{}".format(name))
+        RRAM_ARRAY.validate_cell(row, col)
+        return row, col
+
+    @staticmethod
+    def validate_address(address: int) -> None:
+        # A legacy raw address does not declare an encoding. Accept it only if
+        # at least one of I1003's supported encodings maps it into the array.
+        for name in CellEncoding.ALL:
+            try:
+                CellEncoding.decode(name, address)
+                return
+            except ValueError:
+                pass
+        raise ValueError("器件地址超出 128×128 阵列范围")
+
+
+def validate_instruction(word: int) -> None:
+    if type(word) is not int or not 0 <= word <= 0xFFFFFFFF:
+        raise ValueError("指令字必须为 32 位非负整数")
+    if word >> 28 == OPCODE_WRITEB:
+        if ((word >> 24) & 0xF) > 7 or ((word >> 16) & 0xF) > 7:
+            raise ValueError("WRITEB 的 PE 和阵列都是 0 到 7")
+        CellEncoding.validate_address(word & 0xFFFF)
 
 
 def pulse_pair(ms: float, clk_hz: int = CHIP_CLK_HZ) -> Tuple[int, int]:

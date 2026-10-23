@@ -1,0 +1,211 @@
+"""Offline fault tests: a successful send must never imply verified execution."""
+from contextlib import contextmanager
+import json
+from pathlib import Path
+import socket
+import tempfile
+import threading
+import time
+import unittest
+
+from i1003.engine.runner import Runner, RunEvents, RunOptions
+from i1003.model.items import FpgaItem, PkgItem, PollItem, RawItem, VerifyItem, WaitItem
+from i1003.protocol import fpga
+from i1003.protocol.pkg import Route, Pkg, encode
+from i1003.transport.udp_link import UdpLink
+from rram_console.run_record import RunRecord
+
+R = Route()
+
+
+def reply_to(request, data=1, addr=None, type_=None, route=None):
+    sent = Pkg.decode(fpga.parse_frame(request)[2])
+    route = route or Route(sent.sx, sent.sy, sent.dx, sent.dy, 2)
+    return encode(8 | sent.type if type_ is None else type_, sent.addr if addr is None else addr, data, route)
+
+
+@contextmanager
+def peer(handler):
+    server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    server.bind(("127.0.0.1", 0))
+    server.settimeout(.05)
+    stopped, received = threading.Event(), []
+    events = []
+    link = UdpLink(on_receive=lambda kind, data: events.append((kind, data)))
+    link.open("127.0.0.1", 0, *server.getsockname())
+
+    def serve():
+        while not stopped.is_set():
+            try:
+                data, address = server.recvfrom(65536)
+                received.append(data)
+                for response in handler(data):
+                    server.sendto(response, address)
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        yield link, received, events, server
+    finally:
+        stopped.set()
+        link.close()
+        thread.join(.3)
+        server.close()
+
+
+class Events(RunEvents):
+    def __init__(self):
+        self.logs, self.states, self.outcomes = [], [], []
+        self.waiting = threading.Event()
+    def log(self, tag, head, text):
+        self.logs.append(text)
+    def item_state(self, row, state):
+        self.states.append((row, state))
+    def status(self, text):
+        if text:
+            self.waiting.set()
+    def finished(self, ok):
+        self.outcomes.append(ok)
+
+
+class ExecutionSafetyTest(unittest.TestCase):
+    def run_items(self, link, items):
+        events = Events()
+        runner = Runner(link, events)
+        ok = runner.run(items, RunOptions(R, check_ready=False, gap_s=0), list(range(len(items))))
+        return ok, runner, events
+
+    def test_verify_mismatch_stops_before_next_write(self):
+        with peer(lambda data: [reply_to(data, data=2)]) as (link, received, _, _):
+            ok, runner, events = self.run_items(link, [VerifyItem(addr=8, expect=1), PkgItem(type=4, addr=0, data=1)])
+            self.assertFalse(ok)
+            self.assertEqual(len(received), 1)
+            self.assertEqual(runner.last_result.outcome, "failed")
+            self.assertIn((0, "失败"), events.states)
+
+    def test_raw_and_template_ready_both_await_reply(self):
+        with peer(lambda data: [bytes(7) + b"\x01"]) as (link, received, events, _):
+            ok, runner, _ = self.run_items(link, [RawItem(hex=fpga.read_frame(2).hex()), FpgaItem(addr=2)])
+            self.assertTrue(ok)
+            self.assertEqual(runner.last_result.sent, 2)
+            self.assertEqual([kind for kind, _ in events], ["bit", "bit"])
+            self.assertEqual(received[0], received[1])
+
+    def test_plain_chip_read_awaits_chip_reply(self):
+        with peer(lambda data: [reply_to(data, data=7)]) as (link, _, events, _):
+            ok, _, _ = self.run_items(link, [PkgItem(type=0, addr=8)])
+            self.assertTrue(ok)
+            self.assertEqual(events[0][0], "chip")
+
+    def test_unrelated_packets_do_not_satisfy_chip_request(self):
+        def responses(data):
+            return [b"bad", bytes(7) + b"\x01", reply_to(data, addr=9),
+                    reply_to(data, type_=9), reply_to(data, route=Route(1, 0, 0, 0)), reply_to(data, data=7)]
+        with peer(responses) as (link, _, events, _):
+            ok, _, _ = self.run_items(link, [VerifyItem(addr=8, expect=7)])
+            self.assertTrue(ok)
+            self.assertEqual([kind for kind, _ in events], ["unmatched"] * 5 + ["chip"])
+
+    def test_foreign_sender_cannot_satisfy_request(self):
+        foreign = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            with peer(lambda data: []) as (link, _, events, _):
+                def send_foreign(data, note, quiet):
+                    foreign.sendto(bytes(7) + b"\x01", link._sock.getsockname())
+                link.on_send = send_foreign
+                result = link.request("bit", fpga.read_frame(2), .1)
+                self.assertIsNone(result)
+                self.assertEqual(events[0][0], "foreign")
+        finally:
+            foreign.close()
+
+    def test_missing_fpga_reply_is_failure(self):
+        with peer(lambda data: []) as (link, _, _, _):
+            ok, runner, _ = self.run_items(link, [FpgaItem(addr=2)])
+            self.assertFalse(ok)
+            self.assertEqual(runner.last_result.outcome, "failed")
+
+    def test_poll_without_reply_is_failure(self):
+        with peer(lambda data: []) as (link, _, _, _):
+            ok, runner, _ = self.run_items(link, [PollItem(timeout_s=.08)])
+            self.assertFalse(ok)
+            self.assertEqual(runner.last_result.outcome, "failed")
+
+    def test_close_unblocks_request_and_reopen_is_clean(self):
+        with peer(lambda data: []) as (link, _, _, server):
+            sent = threading.Event()
+            link.on_send = lambda *args: sent.set()
+            values = []
+            worker = threading.Thread(target=lambda: values.append(link.request("bit", fpga.read_frame(2), 5)))
+            worker.start()
+            self.assertTrue(sent.wait(1))
+            link.close()
+            worker.join(.5)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(values, [None])
+            link.open("127.0.0.1", 0, *server.getsockname())
+            self.assertIsNone(link.request("bit", fpga.read_frame(2), .05))
+
+    def test_concurrent_requests_are_serialized(self):
+        with peer(lambda data: [reply_to(data, data=Pkg.decode(data[4:]).addr)]) as (link, _, _, _):
+            results = {}
+            barrier = threading.Barrier(3)
+            def request(addr):
+                barrier.wait()
+                frame = fpga.chip_frame(encode(0, addr, 0, R))
+                response = link.request("chip", frame, .5)
+                results[addr] = None if response is None else Pkg.decode(response).data
+            threads = [threading.Thread(target=request, args=(addr,)) for addr in (8, 9)]
+            for thread in threads:
+                thread.start()
+            barrier.wait()
+            for thread in threads:
+                thread.join(1)
+                self.assertFalse(thread.is_alive())
+            self.assertEqual(results, {8: 8, 9: 9})
+
+    def test_cancel_final_wait_is_not_success(self):
+        with peer(lambda data: []) as (link, _, _, _):
+            ev = Events()
+            runner = Runner(link, ev)
+            self.assertTrue(runner.start([WaitItem(ms=5000)], RunOptions(R, check_ready=False)))
+            self.assertTrue(ev.waiting.wait(1))
+            runner.stop()
+            runner._thread.join(.5)
+            self.assertFalse(runner.busy)
+            self.assertEqual(runner.last_result.outcome, "cancelled")
+            self.assertEqual(ev.outcomes, [False])
+
+    def test_preflight_checks_later_item_before_first_write(self):
+        with peer(lambda data: []) as (link, received, _, _):
+            ok, runner, _ = self.run_items(link, [PkgItem(type=4, addr=8, data=1), PkgItem(type=4, addr=-1)])
+            self.assertFalse(ok)
+            self.assertEqual(runner.last_result.sent, 0)
+            self.assertEqual(received, [])
+
+    def test_pure_writes_have_no_execution_claim(self):
+        with peer(lambda data: []) as (link, _, _, _):
+            ok, runner, _ = self.run_items(link, [PkgItem(type=4, addr=8, data=1)])
+            self.assertTrue(ok)
+            self.assertEqual(runner.last_result.outcome, "sent")
+            self.assertIn("未确认", runner.last_result.summary)
+
+    def test_jsonl_record_preserves_full_packets_and_results(self):
+        with tempfile.TemporaryDirectory() as directory:
+            record = RunRecord({"chip_family": "i1003", "sequence": [{"kind": "wait", "ms": 1}]}, directory)
+            data = bytes(range(256))
+            record.write("rx", hex=data.hex(" "))
+            record.write("result", outcome="failed")
+            record.close()
+            rows = [json.loads(line) for line in Path(record.path).read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([row["event"] for row in rows], ["start", "rx", "result"])
+            self.assertEqual(bytes.fromhex(rows[1]["hex"]), data)
+            self.assertLessEqual(rows[0]["elapsed_s"], rows[2]["elapsed_s"])
+            self.assertTrue(rows[0]["timestamp"].endswith("+00:00"))
+
+
+if __name__ == "__main__":
+    unittest.main()

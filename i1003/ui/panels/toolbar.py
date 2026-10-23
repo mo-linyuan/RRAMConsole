@@ -14,20 +14,21 @@ from ..theme import C
 
 class ConnectionBar:
     def __init__(self, parent, fonts, on_toggle: Callable[[], None]):
-        top = ttk.Frame(parent, padding=(16, 12, 16, 4))
+        top = ttk.Frame(parent)
         top.pack(fill="x")
-        ttk.Label(top, text="I1003 调试台", style="App.TLabel").pack(side="left")
         self.lbl_status = tk.Label(top, text="", bg=C["bg"], fg=C["warn"], font=fonts.bold)
-        self.lbl_status.pack(side="left", padx=20)
         self.lbl_state = tk.Label(top, text="●  未连接", bg=C["bg"], fg=C["sub"], font=fonts.ui)
         self.lbl_state.pack(side="right")
-        self.btn = ttk.Button(top, text="连接", style="Accent.TButton", command=on_toggle)
+        self.btn = ttk.Button(top, text="连接", style="Toolbar.Accent.TButton", command=on_toggle)
         self.btn.pack(side="right", padx=(8, 12))
         self.vars: Dict[str, tk.StringVar] = dict(
             lip=tk.StringVar(value=fpga.PC_IP), lport=tk.StringVar(value=str(fpga.PORT)),
             rip=tk.StringVar(value=fpga.BOARD_IP), rport=tk.StringVar(value=str(fpga.PORT)))
+        self.entries = []
         for key, w, lbl in [("rport", 6, ":"), ("rip", 13, "板卡"), ("lport", 6, ":"), ("lip", 13, "本机")]:
-            ttk.Entry(top, textvariable=self.vars[key], width=w).pack(side="right")
+            entry = ttk.Entry(top, textvariable=self.vars[key], width=w)
+            entry.pack(side="right")
+            self.entries.append(entry)
             ttk.Label(top, text=lbl, style="Bar.TLabel").pack(side="right", padx=(10, 4))
 
     def endpoints(self):
@@ -36,20 +37,26 @@ class ConnectionBar:
 
     def set_connected(self, on: bool) -> None:
         self.btn.config(text="断开" if on else "连接")
-        self.lbl_state.config(text="●  已连接" if on else "●  未连接", fg=C["ok"] if on else C["sub"])
+        self.lbl_state.config(text="●  UDP 已打开" if on else "●  未连接", fg=C["ok"] if on else C["sub"])
+        for entry in self.entries:
+            entry.configure(state="disabled" if on else "normal")
 
     def set_status(self, text: str) -> None:
         self.lbl_status.config(text=text)
+        if text:
+            self.lbl_status.pack(side="left", padx=(0, 10))
+        else:
+            self.lbl_status.pack_forget()
 
 
 class RouteBar:
     def __init__(self, parent, on_route_changed: Callable[[], None]):
         bar = ttk.Frame(parent, padding=(16, 2, 16, 8))
+        self.frame = bar
         bar.pack(fill="x")
         self.vars: Dict[str, tk.Variable] = dict(
             core=tk.StringVar(value="00"), src=tk.StringVar(value="30"), rgn=tk.StringVar(value="0"),
-            gap=tk.StringVar(value="20"), ready=tk.BooleanVar(value=True), quiet=tk.BooleanVar(value=True),
-            fast=tk.BooleanVar(value=False))
+            gap=tk.StringVar(value="20"), ready=tk.BooleanVar(value=True))
 
         def lab(t):
             ttk.Label(bar, text=t, style="Bar.TLabel").pack(side="left", padx=(0, 4))
@@ -60,23 +67,42 @@ class RouteBar:
             cb = ttk.Combobox(bar, textvariable=self.vars[key], values=values, width=w, state="readonly")
             cb.pack(side="left", padx=(0, 14))
             cb.bind("<<ComboboxSelected>>", lambda e: on_route_changed())
-        lab("间隔 ms")
+        lab("间隔 / ms")
         ttk.Entry(bar, textvariable=self.vars["gap"], width=5).pack(side="left", padx=(0, 14))
-        for key, text in [("ready", "发送前查 Ready"), ("quiet", "日志隐藏 Ready 查询"), ("fast", "批量快速发送（每包 100 帧）")]:
-            ttk.Checkbutton(bar, text=text, variable=self.vars[key], style="Bar.TCheckbutton").pack(side="left", padx=(0, 10))
-        ttk.Label(bar, text="源节点 30 是推断（片外口 3）", style="Bar.TLabel").pack(side="right")
+        ttk.Checkbutton(bar, text="发送前查 Ready", variable=self.vars["ready"],
+                        style="Bar.TCheckbutton").pack(side="left", padx=(0, 18))
 
     def route(self) -> Route:
         return Route.from_names(self.vars["core"].get(), self.vars["src"].get(), int(self.vars["rgn"].get()))
+
+    def set_locked(self, locked):
+        for widget in self.frame.winfo_children():
+            if isinstance(widget, (ttk.Entry, ttk.Checkbutton)):
+                widget.configure(state="disabled" if locked else "readonly" if isinstance(widget, ttk.Combobox) else "normal")
 
     def options(self) -> RunOptions:
         try:
             gap = float(self.vars["gap"].get() or 0) / 1000.0
         except ValueError:
             gap = 0.02
-        return RunOptions(route=self.route(), check_ready=self.vars["ready"].get(), gap_s=gap,
-                          fast=self.vars["fast"].get())
+        return RunOptions(route=self.route(), check_ready=self.vars["ready"].get(), gap_s=gap)
 
-    @property
-    def quiet(self) -> bool:
-        return bool(self.vars["quiet"].get())
+
+class ChipSelector:
+    """Only registered chip implementations can be selected."""
+
+    def __init__(self, parent, available, current, on_changed, compact=False):
+        row = ttk.Frame(parent, padding=0 if compact else (16, 4, 16, 8))
+        row.pack(fill="x")
+        self._families = {family.name: family for family in available}
+        self.selected = tk.StringVar(value=current.name)
+        ttk.Label(row, text="芯片系列", style="Bar.TLabel").pack(side="left", padx=(0, 8))
+        self.combo = ttk.Combobox(row, textvariable=self.selected, values=list(self._families),
+                                  state="readonly", width=18)
+        self.combo.pack(side="left")
+        self.combo.bind("<<ComboboxSelected>>", lambda e: on_changed(self._families[self.selected.get()].id))
+        if not compact:
+            ttk.Label(row, text="操作指令随芯片系列加载", style="Bar.TLabel").pack(side="left", padx=14)
+
+    def set_locked(self, locked):
+        self.combo.configure(state="disabled" if locked else "readonly")

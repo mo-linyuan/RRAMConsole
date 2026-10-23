@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import tkinter as tk
+from tkinter import font as tkfont
 from tkinter import messagebox, ttk
 from typing import Dict, Optional
 
 from ...model.items import Item, hexs
 from .. import templates as T
 from ..context import AppContext
-from ..theme import C, info_box
+from ..theme import C, FormViewport, info_box
 
 
 class TemplatePanel:
@@ -21,31 +22,68 @@ class TemplatePanel:
         self.select("写验证脉宽 reg[8]")
 
     def _build(self, p):
-        wrap = ttk.Frame(p, style="Card.TFrame")
+        wrap = ttk.PanedWindow(p, orient="horizontal")
         wrap.pack(fill="both", expand=True)
-        self.tree = ttk.Treeview(wrap, show="tree", selectmode="browse", height=14)
-        self.tree.column("#0", width=190)
-        self.tree.pack(side="left", fill="y")
+        self.split = wrap
+        navigation = ttk.Frame(wrap, style="Card.TFrame")
+        navigation.rowconfigure(0, weight=1)
+        navigation.columnconfigure(0, weight=1)
+        wrap.add(navigation, weight=0)
+        scale = p.winfo_fpixels("1i") / 96
+        self._scale = scale
+        indent = round(14 * scale)
+        ttk.Style(p).configure("Template.Treeview", indent=indent)
+        self.tree = ttk.Treeview(navigation, show="tree", selectmode="browse", height=14,
+                                 style="Template.Treeview")
+        font = tkfont.Font(root=p, font=self.ctx.fonts.ui)
+        tree_width = max(font.measure(t.name) for t in T.TEMPLATES) + 2 * indent + round(24 * scale)
+        self.tree.column("#0", width=tree_width, stretch=False)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        vertical = ttk.Scrollbar(navigation, orient="vertical", command=self.tree.yview)
+        horizontal = ttk.Scrollbar(navigation, orient="horizontal", command=self.tree.xview)
+        vertical.grid(row=0, column=1, sticky="ns")
+        horizontal.grid(row=1, column=0, sticky="ew")
+        self.tree.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
         for g, ts in T.groups():
             gid = self.tree.insert("", "end", text=g, open=True)
             for t in ts:
-                self.tree.insert(gid, "end", iid="tpl::" + t.name, text="   " + t.name)
+                self.tree.insert(gid, "end", iid="tpl::" + t.name, text=t.name)
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
 
         right = ttk.Frame(wrap, style="Card.TFrame", padding=(16, 0, 0, 0))
-        right.pack(side="left", fill="both", expand=True)
-        self.lbl_name = ttk.Label(right, text="", style="Title.TLabel")
-        self.lbl_name.pack(anchor="w")
-        self.form = ttk.Frame(right, style="Card.TFrame", padding=(0, 8))
-        self.form.pack(fill="x")
-        self.lbl_hint = ttk.Label(right, text="", style="Sub.TLabel", wraplength=360, justify="left")
-        self.lbl_hint.pack(anchor="w")
-        self.lbl_prev = info_box(right, self.ctx.fonts, mono=True, wrap=380)
-        btns = ttk.Frame(right, style="Card.TFrame")
-        btns.pack(anchor="w")
+        wrap.add(right, weight=1)
+        initialized = False
+
+        def initialize_width(event):
+            nonlocal initialized
+            if not initialized and event.width > 100:
+                initialized = True
+                wrap.sashpos(0, min(tree_width + vertical.winfo_reqwidth(), event.width // 2))
+
+        wrap.bind("<Configure>", initialize_width)
+        btns = ttk.Frame(right, style="Card.TFrame", padding=(0, 10, 0, 0))
+        btns.pack(side="bottom", fill="x")
         ttk.Button(btns, text="立即发送", style="Accent.TButton", command=self._send).pack(side="left")
         ttk.Button(btns, text="加入序列", command=self._add).pack(side="left", padx=8)
         ttk.Button(btns, text="替换选中", command=self._replace).pack(side="left")
+        self.details_viewport = FormViewport(right)
+        self.details_viewport.pack(fill="both", expand=True)
+        content = self.details_viewport.content
+        self.lbl_name = ttk.Label(content, text="", style="Title.TLabel")
+        self.lbl_name.pack(anchor="w")
+        self.form = ttk.Frame(content, style="Card.TFrame", padding=(0, 8))
+        self.form.pack(fill="x")
+        self.form.columnconfigure(1, weight=1)
+        self.lbl_hint = ttk.Label(content, text="", style="Sub.TLabel", wraplength=360, justify="left")
+        self.lbl_hint.pack(anchor="w")
+        self.lbl_prev = info_box(content, self.ctx.fonts, mono=True, wrap=380)
+        def resize_details(event):
+            width = max(100, event.width - round(24 * scale))
+            self.lbl_name.configure(wraplength=width)
+            self.lbl_hint.configure(wraplength=width)
+            self.lbl_prev.configure(wraplength=max(100, width - 20))
+
+        right.bind("<Configure>", resize_details)
 
     def _on_select(self, _e=None):
         sel = self.tree.selection()
@@ -62,9 +100,10 @@ class TemplatePanel:
         for w in self.form.winfo_children():
             w.destroy()
         self.vars = {}
-        vals = dict(t.defaults(), **(values or {}))
+        vals = t.values(values)
         for r, f in enumerate(t.fields):
-            ttk.Label(self.form, text=f.label, style="Card.TLabel").grid(row=r, column=0, sticky="w", pady=3, padx=(0, 12))
+            ttk.Label(self.form, text=f.label, style="Card.TLabel", wraplength=round(150 * self._scale),
+                      justify="left").grid(row=r, column=0, sticky="w", pady=3, padx=(0, 12))
             var = tk.StringVar(value=vals[f.key])
             if f.kind == "choice":
                 w = ttk.Combobox(self.form, textvariable=var, values=f.options, state="readonly", width=20)
@@ -73,12 +112,14 @@ class TemplatePanel:
                                 command=self.update_preview)
             else:
                 w = ttk.Entry(self.form, textvariable=var, width=40 if f.key == "hex" else 22)
-            w.grid(row=r, column=1, sticky="w", pady=3)
+            w.grid(row=r, column=1, sticky="ew", pady=3)
             var.trace_add("write", lambda *a: self.update_preview())
             self.vars[f.key] = var
         if not t.fields:
             ttk.Label(self.form, text="不需要填写，直接发送或加入序列。", style="Sub.TLabel").grid(row=0, column=0, sticky="w")
         self.update_preview()
+        self.details_viewport._bind_children()
+        self.details_viewport.canvas.yview_moveto(0)
 
     def load(self, it: Item) -> None:
         """序列里双击时载入：模板生成的条目回到原模板；其他条目以原始 HEX 打开。"""
@@ -103,14 +144,14 @@ class TemplatePanel:
             it = self.build()
             self.lbl_hint.config(text=self.cur.describe(self._values()))
             self.lbl_prev.config(text=it.summary(self.ctx.route()), fg=C["text"])
-        except (ValueError, KeyError, IndexError):
-            self.lbl_prev.config(text="填写内容格式不对", fg=C["err"])
+        except (ValueError, KeyError, IndexError) as exc:
+            self.lbl_prev.config(text=str(exc) or "填写内容格式不对", fg=C["err"])
 
     def _item_or_warn(self) -> Optional[Item]:
         try:
             return self.build()
         except (ValueError, KeyError, IndexError) as e:
-            messagebox.showerror("格式错误", "请检查填写的内容（HEX 只能用 0-9、A-F）\n\n{}".format(e))
+            messagebox.showerror("参数有误", str(e))
             return None
 
     def _send(self):

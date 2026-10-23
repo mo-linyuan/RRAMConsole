@@ -8,6 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
+from rram_console.hardware import RRAM_ARRAY
+
 from ..model.items import FpgaItem, Item, PkgItem, PollItem, ProgItem, RawItem, WaitItem
 from ..protocol import fpga, isa
 from ..protocol.pkg import LABEL_TO_TYPE, TYPE_LABELS, PkgType
@@ -35,11 +37,26 @@ class Template:
         return {f.key: str(f.default) for f in self.fields}
 
     def make(self, values: Optional[Dict[str, str]] = None) -> Item:
-        v = self.defaults()
-        v.update(values or {})
+        v = self.values(values)
         it = self.build(v)
         it.meta = {"tpl": self.name, "vals": v}
         return it
+
+    def values(self, values=None):
+        supplied = dict(values or {})
+        if self.name in ("写 WRITEB 指令", "批量写指令（long_tx）") and "dev" in supplied:
+            address = hex_int(supplied.pop("dev"))
+            if "row" not in supplied and "col" not in supplied:
+                # Preserve the exact address when reopening old raw-address templates.
+                encoding = supplied.get("encoding")
+                if encoding is None:
+                    encoding = (isa.CellEncoding.ROW_X128 if address < RRAM_ARRAY.cells
+                                else isa.CellEncoding.ROW_SHIFT8)
+                row, col = isa.CellEncoding.decode(encoding, address)
+                supplied.update(row=str(row), col=str(col), encoding=encoding)
+        result = self.defaults()
+        result.update(supplied)
+        return result
 
     def describe(self, values: Dict[str, str]) -> str:
         parts = []
@@ -70,7 +87,13 @@ def reg_no(s: str) -> int:
 
 
 def _wb(v) -> int:
-    return isa.writeb(int(v["pe"]), v["op"].startswith("SET"), int(v["idx"]), hex_int(v["dev"]))
+    address = isa.CellEncoding.encode(v["encoding"], int(v["row"]), int(v["col"]))
+    return isa.writeb(int(v["pe"]), v["op"].startswith("SET"), int(v["idx"]), address)
+
+
+def _cell_hint(v):
+    address = isa.CellEncoding.encode(v["encoding"], int(v["row"]), int(v["col"]))
+    return "{} 阵列 · 行 {} / 列 {} · 器件地址 0x{:04X}".format(RRAM_ARRAY.label, v["row"], v["col"], address)
 
 
 def _wwv(v) -> isa.WwvConfig:
@@ -78,7 +101,10 @@ def _wwv(v) -> isa.WwvConfig:
 
 
 _CELL = [Field("op", "操作", "choice", OPS[0], OPS), Field("pe", "PE", "int", 0, (0, 7)),
-         Field("idx", "阵列", "int", 0, (0, 7)), Field("dev", "器件地址 HEX", "hex", "0002")]
+         Field("idx", "阵列", "int", 0, (0, 7)),
+         Field("row", "行", "int", 0, (0, RRAM_ARRAY.rows - 1)),
+         Field("col", "列", "int", 2, (0, RRAM_ARRAY.columns - 1)),
+         Field("encoding", "地址编码", "choice", isa.CellEncoding.ROW_X128, isa.CellEncoding.ALL)]
 
 TEMPLATES: List[Template] = [
     # ---- 板卡（地址定义见 FPGA 工程 common_reg.sv）
@@ -101,11 +127,11 @@ TEMPLATES: List[Template] = [
     # ---- 配置
     Template("写验证脉宽 reg[8]", "配置",
              [Field("mode", "模式", "choice", "单器件（WRITEB）", ["单器件（WRITEB）", "一组数据（WRITED）"]),
-              Field("times", "时间倍数", "int", 250, (0, 255)), Field("timeout", "验证次数", "int", 0, (0, 255)),
-              Field("base", "基时间", "int", 40, (0, 255))],
+              Field("times", "时间倍数", "int", 255, (0, 255)), Field("timeout", "验证次数", "int", 0, (0, 255)),
+              Field("base", "基时间", "int", 254, (0, 255))],
              lambda v: PkgItem(desc="写 reg[8] = {:08X}".format(_wwv(v).word), type=PkgType.WRITE_REG,
                                addr=isa.REG_WWV, data=_wwv(v).word),
-             "默认 1 ms（40×250）。I1000 实验台用的是 00FF_00FE（254×255，约 6.5 ms）。",
+             "默认沿用师姐的 00FF_00FE：基时间 254、时间倍数 255、验证次数 0。",
              lambda v: "脉宽 = {} 周期 ≈ {:.3f} ms（10 MHz）".format(_wwv(v).cycles, _wwv(v).pulse_ms)),
     Template("读寄存器", "配置", [Field("reg", "寄存器", "choice", REG_CHOICES[5], REG_CHOICES)],
              lambda v: PkgItem(desc="读 reg[{}]".format(reg_no(v["reg"])), type=PkgType.READ_REG, addr=reg_no(v["reg"])),
@@ -121,13 +147,13 @@ TEMPLATES: List[Template] = [
     Template("写 WRITEB 指令", "指令", [Field("at", "存到指令地址 HEX", "hex", "0000")] + _CELL,
              lambda v: PkgItem(desc="指令[{:04X}] WRITEB {:08X}".format(hex_int(v["at"]), _wb(v)),
                                type=PkgType.WRITE_INST, addr=hex_int(v["at"]), data=_wb(v)),
-             "", lambda v: "指令字 = {:08X}".format(_wb(v))),
+             "行、列均为 0～127。", lambda v: _cell_hint(v) + "\n指令字 = {:08X}".format(_wb(v))),
     Template("批量写指令（long_tx）", "指令",
              [Field("start", "起始指令地址 HEX", "hex", "0000"), Field("count", "条数（0x 开头为十六进制）", "count", "0x0FFF")]
              + _CELL + [Field("stop", "末尾加停止指令", "choice", "是", ["是", "否"])],
              lambda v: ProgItem(desc="批量 {:08X}".format(_wb(v)), start=hex_int(v["start"]),
                                 segs=[[_wb(v), count_int(v["count"])]], stop=v["stop"] == "是"),
-             "", lambda v: "指令 {:08X} 写到 0x{:04X} 起共 {} 条".format(_wb(v), hex_int(v["start"]), count_int(v["count"]))),
+             "行、列均为 0～127。", lambda v: _cell_hint(v) + "\n指令 {:08X} 写到 0x{:04X} 起共 {} 条".format(_wb(v), hex_int(v["start"]), count_int(v["count"]))),
     Template("写停止指令", "指令", [Field("at", "指令地址 HEX", "hex", "0FFF")],
              lambda v: PkgItem(desc="指令[{:04X}] 停止".format(hex_int(v["at"])), type=PkgType.WRITE_INST,
                                addr=hex_int(v["at"]), data=isa.STOP_INST),

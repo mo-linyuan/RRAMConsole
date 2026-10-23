@@ -6,11 +6,14 @@ import tkinter as tk
 from tkinter import font as tkfont
 from tkinter import ttk
 
-C = dict(bg="#F3F4F7", card="#FFFFFF", line="#E3E6EC", text="#1F2328", sub="#6B7280",
-         accent="#2563EB", accent_d="#1D4ED8", ok="#16A34A", warn="#D97706", err="#DC2626", stripe="#F8FAFC")
+from .controls import apply_controls
+
+C = dict(bg="#F4F6F9", card="#FFFFFF", line="#DCE2EB", text="#202A38", sub="#68788D",
+         accent="#2563EB", accent_d="#1D4ED8", ok="#15965B", warn="#AD7114", err="#D63D54",
+         stripe="#F6F8FB", field="#FFFFFF", hover="#F0F4FA", selected="#E8F0FF", disabled="#97A3B3")
 
 LOG_COLORS = {"send": C["accent"], "recv": C["ok"], "ok": C["ok"], "chip": C["warn"], "err": C["err"],
-              "info": C["sub"], "ts": "#9CA3AF"}
+              "info": C["sub"], "ts": "#8492A5"}
 
 
 class Fonts:
@@ -21,6 +24,7 @@ class Fonts:
         mono = next((f for f in ("Consolas", "Cascadia Mono", "Menlo", "DejaVu Sans Mono") if f in fam), "TkFixedFont")
         self.ui, self.bold, self.title = (ui, 10), (ui, 10, "bold"), (ui, 13, "bold")
         self.mono, self.small = (mono, 10), (ui, 9)
+        tkfont.nametofont("TkFixedFont").configure(family=mono, size=10)
         for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont"):
             try:
                 tkfont.nametofont(name).configure(family=ui, size=10)
@@ -35,42 +39,144 @@ def apply_style(f: Fonts) -> None:
     s.configure("Card.TFrame", background=C["card"])
     s.configure("Card.TLabel", background=C["card"], foreground=C["text"])
     s.configure("Sub.TLabel", background=C["card"], foreground=C["sub"], font=f.small)
-    s.configure("Sec.TLabel", background=C["card"], foreground=C["accent"], font=f.small)
+    s.configure("Sec.TLabel", background=C["card"], foreground=C["accent"], font=f.bold)
     s.configure("Title.TLabel", background=C["card"], foreground=C["text"], font=f.bold)
     s.configure("Bar.TLabel", background=C["bg"], foreground=C["sub"])
     s.configure("App.TLabel", background=C["bg"], foreground=C["text"], font=f.title)
     s.configure("TButton", background=C["card"], foreground=C["text"], bordercolor=C["line"], lightcolor=C["card"],
                 darkcolor=C["card"], padding=(10, 4), relief="flat", borderwidth=1, width=-4)
-    s.map("TButton", background=[("active", "#EEF2F7"), ("disabled", C["bg"])], foreground=[("disabled", "#A0A7B4")])
+    s.map("TButton", background=[("active", C["hover"]), ("disabled", C["bg"])], foreground=[("disabled", C["disabled"])])
     s.configure("Accent.TButton", background=C["accent"], foreground="white", bordercolor=C["accent"],
                 lightcolor=C["accent"], darkcolor=C["accent"])
-    s.map("Accent.TButton", background=[("active", C["accent_d"]), ("disabled", "#93B4F5")],
-          foreground=[("disabled", "white")])
+    s.map("Accent.TButton", background=[("active", C["accent_d"]), ("disabled", C["selected"])],
+          foreground=[("disabled", C["sub"])])
     s.configure("Danger.TButton", foreground=C["err"])
+    s.configure("Quiet.TButton", foreground=C["sub"])
     for w in ("TEntry", "TCombobox", "TSpinbox"):
-        s.configure(w, fieldbackground="white", bordercolor=C["line"], lightcolor=C["line"], darkcolor=C["line"],
-                    padding=3, arrowsize=13)
+        s.configure(w, fieldbackground=C["field"], background=C["field"], foreground=C["text"],
+                    insertcolor=C["text"], selectbackground=C["selected"], selectforeground=C["text"],
+                    bordercolor=C["line"], lightcolor=C["field"], darkcolor=C["field"], padding=3, arrowsize=13)
+    s.configure("TEntry", font=f.mono)
+    s.configure("TSpinbox", font=f.mono)
+    s.map("TEntry", bordercolor=[("focus", C["accent"]), ("active", C["sub"])])
     for w, bg in (("Card.TCheckbutton", C["card"]), ("Bar.TCheckbutton", C["bg"])):
         s.configure(w, background=bg)
         s.map(w, background=[("active", bg)])
-    s.configure("Treeview", background="white", fieldbackground="white", rowheight=28, bordercolor=C["line"], font=f.ui)
+    line_height = tkfont.Font(font=f.ui).metrics("linespace")
+    s.configure("Treeview", background=C["card"], fieldbackground=C["card"], rowheight=max(28, line_height + 8),
+                bordercolor=C["card"], lightcolor=C["card"], darkcolor=C["card"], borderwidth=0, font=f.ui)
     s.configure("Treeview.Heading", background=C["stripe"], foreground=C["sub"], font=f.small, relief="flat",
-                padding=(6, 5))
-    s.map("Treeview", background=[("selected", "#DBEAFE")], foreground=[("selected", C["text"])])
+                padding=(8, 8))
+    s.map("Treeview", background=[("selected", C["selected"])], foreground=[("selected", C["text"])])
     s.configure("TProgressbar", background=C["accent"], troughcolor=C["line"], bordercolor=C["line"],
                 lightcolor=C["accent"], darkcolor=C["accent"], thickness=6)
     s.configure("TPanedwindow", background=C["bg"])
-    s.configure("Card.TNotebook", background=C["card"], borderwidth=0)
-    s.configure("Card.TNotebook.Tab", background=C["card"], foreground=C["sub"], padding=(14, 6), borderwidth=0,
+    s.configure("Sash", background=C["bg"], lightcolor=C["bg"], bordercolor=C["bg"], sashthickness=6)
+    s.layout("Horizontal.Sash", [("Sash.hsash", {"sticky": "nswe"})])
+    s.layout("Vertical.Sash", [("Sash.vsash", {"sticky": "nswe"})])
+    s.configure("Card.TNotebook", background=C["card"], borderwidth=0, bordercolor=C["card"],
+                lightcolor=C["card"], darkcolor=C["card"])
+    s.configure("Card.TNotebook.Tab", background=C["card"], foreground=C["sub"], padding=(16, 6), borderwidth=0,
                 font=f.bold)
     s.map("Card.TNotebook.Tab", background=[("selected", C["card"])], foreground=[("selected", C["accent"])])
+    apply_controls(s, f.ui, C)
+    _style_titlebar(s.master)
+
+
+def _style_titlebar(root):
+    """Use the native light Windows caption when supported."""
+    import sys
+    if sys.platform != "win32":
+        return
+
+    def apply():
+        import ctypes
+        try:
+            hwnd = ctypes.windll.user32.GetAncestor(root.winfo_id(), 2)
+            enabled = ctypes.c_int(0)
+            for attribute in (20, 19):
+                result = ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, attribute, ctypes.byref(enabled), ctypes.sizeof(enabled))
+                if result == 0:
+                    break
+        except (AttributeError, OSError, tk.TclError):
+            pass
+    root.after_idle(apply)
+
+
+class RoundedCard(tk.Canvas):
+    """A resizable card; only the inset content frame contains interactive widgets."""
+
+    def __init__(self, parent):
+        super().__init__(parent, bg=C["bg"], bd=0, highlightthickness=0, width=1, height=1)
+        self._scale = self.winfo_fpixels("1i") / 96
+        self._shape = self.create_polygon(0, 0, 0, 0, smooth=True, splinesteps=24,
+                                          fill=C["card"], outline=C["line"])
+        self.content = ttk.Frame(self, style="Card.TFrame", padding=(14, 10))
+        self._window = self.create_window(0, 0, anchor="nw", window=self.content)
+        self.bind("<Configure>", self._resize)
+
+    def _resize(self, event):
+        w, h = event.width - 1, event.height - 1
+        r = min(round(2 * self._scale), w / 2, h / 2)
+        self.coords(self._shape, r, 1, w-r, 1, w, 1, w, r, w, h-r, w, h,
+                    w-r, h, r, h, 1, h, 1, h-r, 1, r, 1, 1)
+        inset = max(4, round(5 * self._scale))
+        self.coords(self._window, inset, inset)
+        self.itemconfigure(self._window, width=max(1, event.width-2*inset), height=max(1, event.height-2*inset))
+
+
+class FormViewport(ttk.Frame):
+    """Scroll long forms in a short window without displacing their action buttons."""
+
+    def __init__(self, parent):
+        super().__init__(parent, style="Card.TFrame")
+        self.canvas = tk.Canvas(self, bg=C["card"], highlightthickness=0, bd=0, width=1, height=1)
+        self.bar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.content = ttk.Frame(self.canvas, style="Card.TFrame")
+        window = self.canvas.create_window(0, 0, anchor="nw", window=self.content)
+        self.canvas.configure(yscrollcommand=self._scroll_state)
+        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(window, width=e.width))
+        self.content.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        self._tag = "FormViewport" + str(id(self))
+        self.bind_class(self._tag, "<MouseWheel>", self._wheel)
+        self.bind_class(self._tag, "<Button-4>", lambda e: self._wheel(e, -3))
+        self.bind_class(self._tag, "<Button-5>", lambda e: self._wheel(e, 3))
+        self.after_idle(self._bind_children)
+        self.bind("<Destroy>", self._destroy_bindings, add="+")
+
+    def _bind_children(self):
+        def visit(widget):
+            if self._tag not in widget.bindtags():
+                widget.bindtags((self._tag,) + widget.bindtags())
+            for child in widget.winfo_children():
+                visit(child)
+        visit(self.canvas)
+
+    def _destroy_bindings(self, event):
+        if event.widget == self:
+            for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                self.unbind_class(self._tag, sequence)
+
+    def _scroll_state(self, first, last):
+        self.bar.set(first, last)
+        if float(last)-float(first) >= .999:
+            self.bar.pack_forget()
+        elif not self.bar.winfo_manager():
+            self.bar.pack(side="right", fill="y")
+
+    def _wheel(self, event, units=None):
+        first, last = self.canvas.yview()
+        if last-first < .999:
+            self.canvas.yview_scroll(units if units is not None else (-3 if event.delta > 0 else 3), "units")
+        return "break"
 
 
 def card(parent, title: str = "", header=None):
-    """白底卡片。返回 (外框, 内容区)；header(frame) 可在标题行右侧放按钮。"""
-    outer = tk.Frame(parent, bg=C["line"], bd=0)
-    inner = ttk.Frame(outer, style="Card.TFrame", padding=(14, 10))
-    inner.pack(fill="both", expand=True, padx=1, pady=1)
+    """面板容器。返回 (外框, 内容区)；header(frame) 可在标题行右侧放按钮。"""
+    outer = RoundedCard(parent)
+    inner = outer.content
     if title:
         head = ttk.Frame(inner, style="Card.TFrame")
         head.pack(fill="x", pady=(0, 8))
@@ -81,9 +187,9 @@ def card(parent, title: str = "", header=None):
 
 
 def info_box(parent, fonts: Fonts, mono: bool = False, wrap: int = 600) -> tk.Label:
-    box = tk.Frame(parent, bg=C["stripe"], highlightthickness=1, highlightbackground=C["line"])
+    box = tk.Frame(parent, bg=C["stripe"], highlightthickness=0)
     box.pack(fill="x", pady=(8, 8))
     lbl = tk.Label(box, text="", bg=C["stripe"], fg=C["text"], font=fonts.mono if mono else fonts.ui, anchor="w",
-                   justify="left", padx=10, pady=7, wraplength=wrap)
+                   justify="left", padx=14, pady=11, wraplength=wrap)
     lbl.pack(fill="x")
     return lbl

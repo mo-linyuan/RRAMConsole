@@ -1,6 +1,6 @@
-"""启动 I1003 调试台：python run.py"""
+"""启动 RRAM芯片控制台：python run.py"""
 
-from i1003.ui.app import main
+from rram_console.app import main
 
 if __name__ == "__main__":
     main()

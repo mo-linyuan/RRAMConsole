@@ -13,6 +13,7 @@ class Settings:
         self.path = path
         self._vars: Dict[str, tk.Variable] = {}
         self._extra: Dict = {}
+        self._stored: Dict = {}
 
     def register(self, prefix: str, variables: Dict[str, tk.Variable]) -> None:
         for k, v in variables.items():
@@ -31,6 +32,7 @@ class Settings:
         except (OSError, ValueError):
             return
         self._extra = data.get("_extra", {})
+        self._stored = data
         for k, v in self._vars.items():
             if k in data:
                 try:
@@ -39,11 +41,13 @@ class Settings:
                     pass
 
     def save(self) -> None:
-        data = {k: v.get() for k, v in self._vars.items()}
+        data = dict(self._stored)
+        data.update({k: v.get() for k, v in self._vars.items()})
         data["_extra"] = self._extra
         try:
             os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
             with open(self.path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=1)
+            self._stored = data
         except OSError:
             pass
