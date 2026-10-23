@@ -23,7 +23,8 @@ def _presets(repeat_provider=None):
                 raise write_test.SpecError("请在上方填写有效的重复次数")
         return write_test.plan(spec).items
 
-    out = {"通信检查 · 写入并读回配置": write_test.path_check}
+    out = {"板卡通信检查 · Ready / 接收使能": write_test.path_check,
+           "可选读回核对 · 需支持芯片回包": write_test.readback_check}
     for name in write_test.SCENES:
         out[write_test.SCENE_LABELS[name]] = (lambda n=name: build(n))
     return out

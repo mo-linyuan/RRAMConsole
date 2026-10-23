@@ -139,6 +139,7 @@ class RunnerTest(unittest.TestCase):
     def test_traversal_fast(self):
         spec = write_test.scene("一行遍历 128 个器件（I1000 traversal）")
         spec.pulse_ms = 0.001
+        spec.check_reg8 = spec.check_inst = spec.poll_after = True
         ok, ev, board = self._run(write_test.plan(spec).items, fast=True)
         self.assertTrue(ok)
         self.assertEqual(len(board.inst), 129)
@@ -146,11 +147,19 @@ class RunnerTest(unittest.TestCase):
         self.assertIn(("ok", "芯片执行完成，reg[0] = 0x00000080"), ev.logs)
 
     def test_without_chip_reply(self):
-        spec = write_test.WriteTestSpec(repeat=5, pulse_ms=0.001)
+        spec = write_test.WriteTestSpec(repeat=5, pulse_ms=0.001, check_reg8=True)
         ok, ev, board = self._run(write_test.plan(spec).items, fast=False, chip_replies=False, port=9190)
         self.assertFalse(ok)
         self.assertEqual(len(board.inst), 0)       # Stop before programming or starting the core.
         self.assertTrue(any("核对失败" in text for _, text in ev.logs))
+
+    def test_default_write_does_not_require_chip_reply(self):
+        spec = write_test.WriteTestSpec(repeat=5, pulse_ms=0.001, remind_4200=False)
+        ok, ev, board = self._run(write_test.plan(spec).items, fast=False, chip_replies=False, port=9192)
+        self.assertTrue(ok)
+        self.assertEqual(len(board.inst), 6)
+        self.assertTrue(any("已发送，预计等待结束" in text for _, text in ev.logs))
+        self.assertFalse(any("芯片执行完成" in text for _, text in ev.logs))
 
 
 if __name__ == "__main__":

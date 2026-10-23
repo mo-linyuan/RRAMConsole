@@ -19,6 +19,38 @@ except Exception:  # noqa: BLE001
 
 @unittest.skipUnless(HAS_DISPLAY, "没有图形环境")
 class UiSmokeTest(unittest.TestCase):
+    def test_old_readback_defaults_migrate_once(self):
+        import json
+        from pathlib import Path
+        import i1003.ui.app as A
+        from i1003.ui.panels.quick_panel import AFTER
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            path.write_text(json.dumps({"quick.check_reg8": True, "quick.check_inst": True,
+                                        "quick.poll_after": True, "quick.after": AFTER[0], "quick.repeat": "9"}), encoding="utf-8")
+            with patch.object(A, "SETTINGS_FILE", str(path)):
+                root = tk.Tk()
+                root.withdraw()
+                try:
+                    app = A.App(root)
+                    spec = app.quick.spec()
+                    self.assertFalse(spec.check_reg8 or spec.check_inst or spec.poll_after)
+                    self.assertEqual(spec.repeat, 9)
+                    self.assertTrue(app.route_bar.vars["ready"].get())
+                    app.quick.vars["check_reg8"].set(True)
+                    app.quick.after.set(AFTER[0])
+                    app._save_settings()
+                finally:
+                    root.destroy()
+                root = tk.Tk()
+                root.withdraw()
+                try:
+                    app = A.App(root)
+                    self.assertTrue(app.quick.spec().check_reg8)
+                    self.assertTrue(app.quick.spec().poll_after)
+                finally:
+                    root.destroy()
+
     def test_offline_run_records_and_locks_sequence(self):
         import json
         import time

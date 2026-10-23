@@ -72,6 +72,25 @@ class Events(RunEvents):
 
 
 class ExecutionSafetyTest(unittest.TestCase):
+    def test_default_scenes_do_not_generate_chip_readback(self):
+        from i1003.recipes import write_test as W
+        for name in W.SCENES:
+            with self.subTest(scene=name):
+                spec = W.scene(name)
+                self.assertFalse(spec.check_reg8 or spec.check_inst or spec.poll_after)
+                items = W.plan(spec).items
+                self.assertFalse(any(isinstance(item, (VerifyItem, PollItem)) for item in items))
+                self.assertTrue(all(not isinstance(item, PkgItem) or item.type >= 4 for item in items))
+
+    def test_optional_readback_check_stays_strict(self):
+        from i1003.recipes.write_test import readback_check
+        items = readback_check()
+        self.assertTrue(any(isinstance(item, VerifyItem) for item in items))
+        with peer(lambda data: [bytes(7) + b"\x01"] if not fpga.parse_frame(data)[0] else []) as (link, _, _, _):
+            ok, runner, _ = self.run_items(link, items)
+            self.assertFalse(ok)
+            self.assertEqual(runner.last_result.outcome, "failed")
+
     def run_items(self, link, items):
         events = Events()
         runner = Runner(link, events)
@@ -128,9 +147,10 @@ class ExecutionSafetyTest(unittest.TestCase):
         with peer(respond) as (link, received, _, _):
             ok, runner, _ = self.run_items(link, path_check())
             self.assertTrue(ok)
-            self.assertEqual(runner.last_result.sent, 3)
+            self.assertEqual(runner.last_result.sent, 2)
             self.assertEqual(received[0], fpga.read_frame(fpga.Addr.CHIP_READY))
-            self.assertEqual(runner.last_result.outcome, "checked")
+            self.assertEqual(runner.last_result.outcome, "sent")
+            self.assertTrue(all(not fpga.parse_frame(data)[0] for data in received))
 
     def test_plain_chip_read_awaits_chip_reply(self):
         with peer(lambda data: [reply_to(data, data=7)]) as (link, _, events, _):

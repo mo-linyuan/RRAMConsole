@@ -9,6 +9,18 @@ class I1003Backend:
     # Keep the existing I1003 setting names to preserve installed configurations.
     settings_prefix = ""
 
+    def migrate_settings(self, settings, quick):
+        # Reset former mandatory-readback defaults once, including saved installs.
+        marker = (self.settings_prefix or "i1003.") + "send_only_defaults_v1"
+        if settings.get_extra(marker, False):
+            return
+        from i1003.ui.panels.quick_panel import AFTER
+        for name in ("poll_after", "check_reg8", "check_inst"):
+            quick.vars[name].set(False)
+        quick.after.set(AFTER[1])
+        settings.set_extra(marker, True)
+        settings.save()
+
     def create_link(self, on_send, on_receive):
         from i1003.transport.udp_link import UdpLink
         return UdpLink(on_send=on_send, on_receive=on_receive)

@@ -43,9 +43,9 @@ class WriteTestSpec:
     hold_s: float = 0.0                 # 兼容旧脚本；界面不再使用秒数反推次数
     pulse_ms: Optional[float] = None    # 兼容旧脚本；None 表示直接使用基时间和倍数
     verify_times: int = 0
-    poll_after: bool = True
-    check_reg8: bool = True
-    check_inst: bool = True
+    poll_after: bool = False
+    check_reg8: bool = False
+    check_inst: bool = False
     remind_4200: bool = True
 
     def to_dict(self) -> Dict:
@@ -162,8 +162,8 @@ def plan(spec: WriteTestSpec) -> Plan:
     if s.check_inst:
         items.append(VerifyItem(desc="核对指令[0000]", type=PkgType.READ_INST, addr=0, expect=segs[0][0]))
     items.append(PkgItem(desc="启动 reg[0]=1", type=PkgType.WRITE_REG, addr=isa.REG_STATUS, data=isa.START_VALUE))
-    items.append(WaitItem(desc="芯片工作中", ms=int(est * 1000) + 300,
-                          notify=("芯片已启动，预计工作 {:.1f} s。需要的话现在去 4200 点 run。".format(est)
+    items.append(WaitItem(desc="预计执行等待", meta={"estimated_execution": True}, ms=int(est * 1000) + 300,
+                          notify=("启动指令已发送，预计工作 {:.1f} s。需要的话现在去 4200 点 run。".format(est)
                                   if s.remind_4200 else "")))
     if s.poll_after:
         items.append(PollItem(desc="确认执行结束", timeout_s=10))
@@ -180,7 +180,13 @@ def plan(spec: WriteTestSpec) -> Plan:
 
 
 def path_check(wwv: WwvConfig = None) -> List[Item]:
-    """只检查通路：查 Ready → 写 reg[8] → 读回核对。不碰 RRAM。"""
+    """Check FPGA communication only; no chip readback or register writes."""
+    return [FpgaItem(desc="查询 Ready", addr=fpga.Addr.CHIP_READY),
+            FpgaItem(desc="读取 FPGA 接收使能", addr=fpga.Addr.RX_ENABLE)]
+
+
+def readback_check(wwv: WwvConfig = None) -> List[Item]:
+    """Optional register check for hardware with a supported chip reply path."""
     wwv = wwv or WwvConfig()
     return [FpgaItem(desc="查询 Ready", addr=fpga.Addr.CHIP_READY),
             PkgItem(desc="写 reg[8] = {:08X}".format(wwv.word), type=PkgType.WRITE_REG, addr=isa.REG_WWV, data=wwv.word),

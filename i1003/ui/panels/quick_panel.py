@@ -44,7 +44,7 @@ class QuickPanel:
                 continue
             v = getattr(d, f.name)
             self.vars[f.name] = tk.BooleanVar(value=v) if isinstance(v, bool) else tk.StringVar(value=str(v))
-        self.after = tk.StringVar(value=AFTER[0])
+        self.after = tk.StringVar(value=AFTER[1])
         self.op_display = tk.StringVar(value=OP_LABELS[d.op])
         self.show_details = tk.BooleanVar(value=False)
         self.total_time_text = tk.StringVar(value="—")
@@ -63,7 +63,7 @@ class QuickPanel:
         btns.pack(side="bottom", fill="x")
         ttk.Button(btns, text="一键运行", style="Accent.TButton", command=self.run).pack(side="left")
         ttk.Button(btns, text="生成到序列", command=self.to_sequence).pack(side="left", padx=8)
-        ttk.Button(btns, text="检查通路", command=self.path_check).pack(side="left")
+        ttk.Button(btns, text="检查板卡通信", command=self.path_check).pack(side="left")
         self.viewport = FormViewport(p)
         self.viewport.pack(fill="both", expand=True)
         p = self.viewport.content
@@ -129,6 +129,8 @@ class QuickPanel:
         for key, text in [("check_reg8", "核对 reg[8]"), ("check_inst", "核对首条指令"),
                           ("remind_4200", "提醒操作 4200")]:
             ttk.Checkbutton(cf, text=text, variable=V[key], style="Card.TCheckbutton").pack(side="left", padx=(0, 12))
+        ttk.Label(g, text="默认不读取芯片回包；核对与结束查询仅在硬件支持读回时开启。",
+                  style="Sub.TLabel", wraplength=600).grid(row=10, column=0, columnspan=8, sticky="w", pady=(4, 0))
 
         preview = ttk.Frame(p, style="Card.TFrame")
         preview.pack(fill="x", pady=(12, 0))

@@ -69,6 +69,7 @@ class Runner:
     def run(self, items, opt, rows):
         self._sent = self._total = 0
         self._verified = self._execution_confirmed = False
+        self._estimated_wait_done = False
         t0, all_ok = time.monotonic(), True
         current = None
         self.ev.progress(0, 1)
@@ -94,7 +95,7 @@ class Runner:
                 self.ev.item_state(row, "运行中")
                 ok = self._run_item(it, opt)
                 state = ("已核对" if isinstance(it, VerifyItem) else "已确认" if isinstance(it, PollItem)
-                         else "已等待" if isinstance(it, WaitItem) else "已发送")
+                         else ("预计等待结束" if it.meta.get("estimated_execution") else "已等待") if isinstance(it, WaitItem) else "已发送")
                 self.ev.item_state(row, state if ok and not self._stop.is_set()
                                    else "已停止" if self._stop.is_set() else "失败")
                 self.ev.progress(self._sent, self._total)
@@ -114,6 +115,8 @@ class Runner:
                 outcome, summary = "completed", "任务完成，已读到芯片结束标志"
             elif self._verified:
                 outcome, summary = "checked", "步骤完成，指定数据核对通过；未确认芯片执行结束"
+            elif self._estimated_wait_done:
+                outcome, summary = "sent", "已发送，预计等待结束；未读取芯片执行状态"
             else:
                 outcome, summary = "sent", "步骤完成；未确认芯片执行结束"
             self.last_result = RunResult(outcome, self._sent, self._total, time.monotonic() - t0, summary)
@@ -132,6 +135,8 @@ class Runner:
                 self.ev.log("info", "提示", it.notify)
                 self.ev.notify(it.notify)
             self._countdown(it.ms / 1000.0, it.desc or "等待")
+            if it.meta.get("estimated_execution") and not self._stop.is_set():
+                self._estimated_wait_done = True
             return not self._stop.is_set()
         if isinstance(it, ProgItem):
             return self._send_prog(it, opt)
