@@ -1,0 +1,13 @@
+{
+  "simulation": true,
+  "hardware_commands_sent": 0,
+  "startup_ms": 1360.342,
+  "synchronous_list": true,
+  "load_request_ms": 75.265,
+  "load_complete_ms": 94.272,
+  "list_max_heartbeat_gap_ms": 75.628,
+  "logs_5000_ms": 583.403,
+  "logs_max_heartbeat_gap_ms": 22.124,
+  "scroll_median_ms": 9.729,
+  "scroll_max_ms": 13.855
+}

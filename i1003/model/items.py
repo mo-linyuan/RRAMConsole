@@ -85,10 +85,11 @@ class PkgItem(Item):
             raise ValueError("芯片地址必须为 16 位无符号整数")
         if type(self.data) is not int or not 0 <= self.data <= 0xFFFFFFFF:
             raise ValueError("芯片数据必须为 32 位无符号整数")
-        if self.type == PkgType.WRITE_INST:
+        if self.type in (PkgType.READ_INST, PkgType.WRITE_INST):
             if type(self.addr) is not int or not 0 <= self.addr < isa.INST_DEPTH:
                 raise ValueError("指令地址必须为 0～{}".format(isa.INST_DEPTH - 1))
-            isa.validate_instruction(self.data)
+            if self.type == PkgType.WRITE_INST:
+                isa.validate_instruction(self.data)
 
     def frames(self, route, limit=None):
         self.validate()
@@ -122,8 +123,10 @@ class ProgItem(Item):
     def words(self, limit=None) -> List[int]:
         self.validate()
         out: List[int] = []
+        if limit is not None and limit <= 0:
+            return out
         for w, c in self.segs:
-            out.extend([w] * c)
+            out.extend([w] * (c if limit is None else min(c, limit - len(out))))
             if limit is not None and len(out) >= limit:
                 return out[:limit]
         if self.stop:
@@ -144,7 +147,7 @@ class ProgItem(Item):
 @dataclass
 class WaitItem(Item):
     ms: int = 1000
-    notify: str = ""          # 开始等待时弹窗提示的内容，空则不弹
+    notify: str = ""          # 开始等待时在日志/状态栏提示，不弹窗
     kind = "wait"
 
     def validate(self):
@@ -173,6 +176,23 @@ class VerifyItem(Item):
 
     def frames(self, route, limit=None):
         return [(fpga.chip_frame(encode(self.type, self.addr, 0, route)), True)]
+
+
+@dataclass
+class FpgaProbeItem(Item):
+    """Stage a harmless chip register READ, then check FPGA's saved PKG only."""
+    kind = "fpga_probe"
+
+    def count(self):
+        return 2
+
+    def frames(self, route, limit=None):
+        frames = [(fpga.chip_frame(encode(PkgType.READ_REG, isa.REG_WWV, 0, route)), True),
+                  (fpga.read_frame(fpga.Addr.NOC_OUT), False)]
+        return frames if limit is None else frames[:limit]
+
+    def summary(self, route):
+        return "发送只读 PKG → 回读 FPGA 暂存（不写 RRAM、不启动核）"
 
 
 @dataclass
@@ -207,7 +227,7 @@ class RawItem(Item):
         return [(b, fpga.is_chip_frame(b))]
 
 
-KINDS: Dict[str, Type[Item]] = {c.kind: c for c in (FpgaItem, PkgItem, ProgItem, WaitItem, VerifyItem, PollItem, RawItem)}
+KINDS: Dict[str, Type[Item]] = {c.kind: c for c in (FpgaItem, PkgItem, ProgItem, WaitItem, VerifyItem, FpgaProbeItem, PollItem, RawItem)}
 BULK_KINDS = (ProgItem,)
 
 

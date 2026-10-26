@@ -1,0 +1,82 @@
+{
+  "window": {
+    "median_ms": 135.673,
+    "p95_ms": 192.848,
+    "max_ms": 657.588,
+    "frames": 18
+  },
+  "workspace_sash": {
+    "median_ms": 77.952,
+    "p95_ms": 94.982,
+    "max_ms": 148.702,
+    "frames": 18
+  },
+  "log_sash": {
+    "median_ms": 84.99,
+    "p95_ms": 112.087,
+    "max_ms": 123.314,
+    "frames": 18
+  },
+  "template_sash": {
+    "median_ms": 44.396,
+    "p95_ms": 49.912,
+    "max_ms": 55.308,
+    "frames": 18
+  },
+  "callbacks": [
+    {
+      "file": "theme.py",
+      "function": "apply",
+      "calls": 120,
+      "cumulative_ms": 34.647
+    },
+    {
+      "file": "sequence_panel.py",
+      "function": "fit_actions",
+      "calls": 41,
+      "cumulative_ms": 10.988
+    },
+    {
+      "file": "app.py",
+      "function": "_pump",
+      "calls": 108,
+      "cumulative_ms": 8.708
+    },
+    {
+      "file": "theme.py",
+      "function": "resize",
+      "calls": 120,
+      "cumulative_ms": 3.609
+    },
+    {
+      "file": "theme.py",
+      "function": "_fit_content",
+      "calls": 74,
+      "cumulative_ms": 3.383
+    },
+    {
+      "file": "theme.py",
+      "function": "_update_region",
+      "calls": 33,
+      "cumulative_ms": 1.836
+    },
+    {
+      "file": "theme.py",
+      "function": "_scroll_state",
+      "calls": 74,
+      "cumulative_ms": 1.769
+    },
+    {
+      "file": "app.py",
+      "function": "_fit_header",
+      "calls": 18,
+      "cumulative_ms": 0.428
+    },
+    {
+      "file": "app.py",
+      "function": "flush_logs",
+      "calls": 108,
+      "cumulative_ms": 0.065
+    }
+  ]
+}

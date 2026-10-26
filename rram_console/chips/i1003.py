@@ -12,18 +12,20 @@ class I1003Backend:
     def migrate_settings(self, settings, quick):
         # Reset former mandatory-readback defaults once, including saved installs.
         marker = (self.settings_prefix or "i1003.") + "send_only_defaults_v1"
-        if settings.get_extra(marker, False):
-            return
-        from i1003.ui.panels.quick_panel import AFTER
-        for name in ("poll_after", "check_reg8", "check_inst"):
-            quick.vars[name].set(False)
-        quick.after.set(AFTER[1])
-        settings.set_extra(marker, True)
+        settings.set_extra(marker, True)  # Removed readback/wait controls are no longer loaded.
+        single_marker = (self.settings_prefix or "i1003.") + "single_device_default_v1"
+        if not settings.get_extra(single_marker, False):
+            # Retire the former automatic 4095-repeat default once. Other
+            # custom counts survive; future explicit 4095 choices also survive.
+            if str(quick.vars["repeat"].get()).strip() == "4095":
+                quick.vars["repeat"].set("1")
+                quick.scene.set("单器件只打一次")
+            settings.set_extra(single_marker, True)
         settings.save()
 
     def create_link(self, on_send, on_receive):
-        from i1003.transport.udp_link import UdpLink
-        return UdpLink(on_send=on_send, on_receive=on_receive)
+        from i1003.transport.simulator import SimulatableUdpLink
+        return SimulatableUdpLink(on_send=on_send, on_receive=on_receive)
 
     def create_runner(self, link, events):
         from i1003.engine.runner import Runner
@@ -34,6 +36,13 @@ class I1003Backend:
         return ConnectionBar(parent, fonts, on_toggle)
 
     def open_link(self, link, connection_bar):
+        if connection_bar.is_simulation():
+            from i1003.transport.simulator import PROFILES
+            label = connection_bar.profile.get()
+            link.open_simulation(PROFILES[label])
+            lip, lport, rip, rport = link.endpoints
+            return ("[离线模拟] {} · {}:{} → {}:{}；仅验证软件协议和流程，不代表芯片执行或导通".format(
+                label, lip, lport, rip, rport))
         lip, lport, rip, rport = connection_bar.endpoints()
         link.open(lip, lport, rip, rport)
         return "UDP 已打开 {}:{} → {}:{}".format(lip, lport, rip, rport)
@@ -65,30 +74,27 @@ class I1003Backend:
         from dataclasses import asdict
         return {"options": asdict(options), "sequence": [item.to_dict() for item in items]}
 
-    def start_confirmation(self, items, route):
-        if not any(item.is_start() for item in items):
-            return None
-        return ("要运行的内容里有“启动核”，核 {} 会开始执行指令区，可能真正写器件。\n\n"
-                "请确认：指令区末尾有停止指令，电压和 forming 已确认。继续？".format(route.core))
-
     def describe_receive(self, kind, data):
         from i1003.model.items import hexs
         from i1003.protocol.pkg import Pkg
+        preview = hexs(data[:120])
+        if len(data) > 120:
+            preview += " …（共 {} 字节，仅显示预览）".format(len(data))
         if kind == "bit":
-            return "recv", "接收", "{}    值={}".format(hexs(data), data[7] & 1)
+            return "recv", "接收", "{}    值={}".format(preview, data[7] & 1)
         if kind == "fpga":
-            return "recv", "接收", "{}    FPGA 存值（不是芯片回包）".format(hexs(data))
+            return "recv", "接收", "{}    FPGA 读回数据（不是芯片回包）".format(preview)
         if kind == "foreign":
-            return "info", "忽略", "{}    来自非目标板卡的 UDP 包，未用于核对".format(hexs(data))
+            return "info", "忽略", "{}    来自非目标板卡的 UDP 包，未用于核对".format(preview)
         if kind == "unmatched":
             note = "未匹配当前请求，未用于核对"
             if len(data) == 8 and Pkg.decode(data).type in range(8, 12):
                 note += " · " + Pkg.decode(data).describe()
-            return "info", "未匹配", "{}    {}".format(hexs(data), note)
+            return "info", "未匹配", "{}    {}".format(preview, note)
         note = "可能来自芯片"
         if len(data) == 8:
             note += "  ·  " + Pkg.decode(data).describe()
-        return "chip", "芯片", "{}    {}".format(hexs(data), note)
+        return "chip", "芯片", "{}    {}".format(preview, note)
 
     def apply_header(self, header, ctx):
         from i1003.protocol.pkg import NODES

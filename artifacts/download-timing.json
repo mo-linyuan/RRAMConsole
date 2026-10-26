@@ -1,0 +1,22 @@
+[
+  {
+    "simulation": true,
+    "check_ready": false,
+    "control_gap_ms": 20,
+    "download_gap_ms": 0,
+    "frames_sent": 4096,
+    "download_s": 0.382534,
+    "datagram_frames_received": 4097,
+    "last_slot_is_stop": true
+  },
+  {
+    "simulation": true,
+    "check_ready": true,
+    "control_gap_ms": 20,
+    "download_gap_ms": 0,
+    "frames_sent": 4096,
+    "download_s": 1.181552,
+    "datagram_frames_received": 8193,
+    "last_slot_is_stop": true
+  }
+]

@@ -44,7 +44,7 @@ def apply_style(f: Fonts) -> None:
     s.configure("Bar.TLabel", background=C["bg"], foreground=C["sub"])
     s.configure("App.TLabel", background=C["bg"], foreground=C["text"], font=f.title)
     s.configure("TButton", background=C["card"], foreground=C["text"], bordercolor=C["line"], lightcolor=C["card"],
-                darkcolor=C["card"], padding=(10, 4), relief="flat", borderwidth=1, width=-4)
+                darkcolor=C["card"], padding=(8, 3), relief="flat", borderwidth=1, width=-4)
     s.map("TButton", background=[("active", C["hover"]), ("disabled", C["bg"])], foreground=[("disabled", C["disabled"])])
     s.configure("Accent.TButton", background=C["accent"], foreground="white", bordercolor=C["accent"],
                 lightcolor=C["accent"], darkcolor=C["accent"])
@@ -63,10 +63,10 @@ def apply_style(f: Fonts) -> None:
         s.configure(w, background=bg)
         s.map(w, background=[("active", bg)])
     line_height = tkfont.Font(font=f.ui).metrics("linespace")
-    s.configure("Treeview", background=C["card"], fieldbackground=C["card"], rowheight=max(28, line_height + 8),
+    s.configure("Treeview", background=C["card"], fieldbackground=C["card"], rowheight=max(25, line_height + 6),
                 bordercolor=C["card"], lightcolor=C["card"], darkcolor=C["card"], borderwidth=0, font=f.ui)
     s.configure("Treeview.Heading", background=C["stripe"], foreground=C["sub"], font=f.small, relief="flat",
-                padding=(8, 8))
+                padding=(6, 4))
     s.map("Treeview", background=[("selected", C["selected"])], foreground=[("selected", C["text"])])
     s.configure("TProgressbar", background=C["accent"], troughcolor=C["line"], bordercolor=C["line"],
                 lightcolor=C["accent"], darkcolor=C["accent"], thickness=6)
@@ -76,7 +76,7 @@ def apply_style(f: Fonts) -> None:
     s.layout("Vertical.Sash", [("Sash.vsash", {"sticky": "nswe"})])
     s.configure("Card.TNotebook", background=C["card"], borderwidth=0, bordercolor=C["card"],
                 lightcolor=C["card"], darkcolor=C["card"])
-    s.configure("Card.TNotebook.Tab", background=C["card"], foreground=C["sub"], padding=(16, 6), borderwidth=0,
+    s.configure("Card.TNotebook.Tab", background=C["card"], foreground=C["sub"], padding=(12, 5), borderwidth=0,
                 font=f.bold)
     s.map("Card.TNotebook.Tab", background=[("selected", C["card"])], foreground=[("selected", C["accent"])])
     apply_controls(s, f.ui, C)
@@ -101,52 +101,103 @@ def _style_titlebar(root):
                     break
         except (AttributeError, OSError, tk.TclError):
             pass
-    root.after_idle(apply)
+    job = root.after_idle(apply)
+    def dispose(event):
+        if event.widget == root:
+            root.after_cancel(job)
+    root.bind("<Destroy>", dispose, add="+")
 
 
-class RoundedCard(tk.Canvas):
-    """A resizable card; only the inset content frame contains interactive widgets."""
+class CardFrame(tk.Frame):
+    """Native geometry container: no full-panel Canvas redraw on each drag."""
 
     def __init__(self, parent):
-        super().__init__(parent, bg=C["bg"], bd=0, highlightthickness=0, width=1, height=1)
-        self._scale = self.winfo_fpixels("1i") / 96
-        self._shape = self.create_polygon(0, 0, 0, 0, smooth=True, splinesteps=24,
-                                          fill=C["card"], outline=C["line"])
-        self.content = ttk.Frame(self, style="Card.TFrame", padding=(14, 10))
-        self._window = self.create_window(0, 0, anchor="nw", window=self.content)
-        self.bind("<Configure>", self._resize)
+        super().__init__(parent, bg=C["card"], bd=0, highlightthickness=1, highlightbackground=C["line"])
+        inset = max(2, round(3 * self.winfo_fpixels("1i") / 96))
+        self.content = ttk.Frame(self, style="Card.TFrame", padding=(10, 6))
+        self.content.pack(fill="both", expand=True, padx=inset, pady=inset)
 
-    def _resize(self, event):
-        w, h = event.width - 1, event.height - 1
-        r = min(round(2 * self._scale), w / 2, h / 2)
-        self.coords(self._shape, r, 1, w-r, 1, w, 1, w, r, w, h-r, w, h,
-                    w-r, h, r, h, 1, h, 1, h-r, 1, r, 1, 1)
-        inset = max(4, round(5 * self._scale))
-        self.coords(self._window, inset, inset)
-        self.itemconfigure(self._window, width=max(1, event.width-2*inset), height=max(1, event.height-2*inset))
+
+def bind_wrap(label, source=None, padding=0):
+    """Coalesce width changes; height-only events must not reflow text again."""
+    source = source or label
+    pending = None
+    latest = applied = None
+
+    def apply():
+        nonlocal pending, applied
+        pending = None
+        if latest != applied:
+            applied = latest
+            label.configure(wraplength=latest)
+
+    def resize(event):
+        nonlocal pending, latest
+        width = max(100, event.width - padding)
+        if width == latest:
+            return
+        latest = width
+        if pending is None:
+            pending = source.after(16, apply)
+
+    def destroy(event):
+        nonlocal pending
+        if event.widget == source and pending is not None:
+            source.after_cancel(pending)
+            pending = None
+
+    source.bind("<Configure>", resize, add="+")
+    source.bind("<Destroy>", destroy, add="+")
 
 
 class FormViewport(ttk.Frame):
     """Scroll long forms in a short window without displacing their action buttons."""
 
-    def __init__(self, parent):
+    def __init__(self, parent, min_width=0):
         super().__init__(parent, style="Card.TFrame")
+        self._minimum_width = min_width
         self.canvas = tk.Canvas(self, bg=C["card"], highlightthickness=0, bd=0, width=1, height=1)
         self.bar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
-        self.canvas.pack(side="left", fill="both", expand=True)
+        self.horizontal = ttk.Scrollbar(self, orient="horizontal", command=self.canvas.xview)
+        self.rowconfigure(0, weight=1)
+        self.columnconfigure(0, weight=1)
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.bar.grid(row=0, column=1, sticky="ns")
+        self.horizontal.grid(row=1, column=0, sticky="ew")
         self.content = ttk.Frame(self.canvas, style="Card.TFrame")
-        window = self.canvas.create_window(0, 0, anchor="nw", window=self.content)
-        self.canvas.configure(yscrollcommand=self._scroll_state)
-        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(window, width=e.width))
-        self.content.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        self._window = self.canvas.create_window(0, 0, anchor="nw", window=self.content)
+        self._content_width = None
+        self._region = None
+        self.canvas.configure(yscrollcommand=self.bar.set, xscrollcommand=self.horizontal.set)
+        self.canvas.bind("<Configure>", self._fit_content)
+        self.content.bind("<Configure>", self._update_region)
         self._tag = "FormViewport" + str(id(self))
         self.bind_class(self._tag, "<MouseWheel>", self._wheel)
         self.bind_class(self._tag, "<Button-4>", lambda e: self._wheel(e, -3))
         self.bind_class(self._tag, "<Button-5>", lambda e: self._wheel(e, 3))
-        self.after_idle(self._bind_children)
+        self._bindings_job = self.after_idle(self._bind_children)
         self.bind("<Destroy>", self._destroy_bindings, add="+")
 
+    def _fit_content(self, event=None):
+        available = self.canvas.winfo_width()
+        # Wrapped text changes its requested width as the viewport resizes.
+        # Use an explicit form minimum to avoid a geometry feedback loop.
+        needed = self._minimum_width
+        target = max(available, needed)
+        if target != self._content_width:
+            self._content_width = target
+            self.canvas.itemconfigure(self._window, width=target)
+
+    def _update_region(self, event=None):
+        region = self.canvas.bbox("all")
+        if region != self._region:
+            self._region = region
+            self.canvas.configure(scrollregion=region)
+
     def _bind_children(self):
+        if self._bindings_job is not None:
+            self.after_cancel(self._bindings_job)
+        self._bindings_job = None
         def visit(widget):
             if self._tag not in widget.bindtags():
                 widget.bindtags((self._tag,) + widget.bindtags())
@@ -156,15 +207,11 @@ class FormViewport(ttk.Frame):
 
     def _destroy_bindings(self, event):
         if event.widget == self:
+            if self._bindings_job is not None:
+                self.after_cancel(self._bindings_job)
+                self._bindings_job = None
             for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
                 self.unbind_class(self._tag, sequence)
-
-    def _scroll_state(self, first, last):
-        self.bar.set(first, last)
-        if float(last)-float(first) >= .999:
-            self.bar.pack_forget()
-        elif not self.bar.winfo_manager():
-            self.bar.pack(side="right", fill="y")
 
     def _wheel(self, event, units=None):
         first, last = self.canvas.yview()
@@ -175,11 +222,11 @@ class FormViewport(ttk.Frame):
 
 def card(parent, title: str = "", header=None):
     """面板容器。返回 (外框, 内容区)；header(frame) 可在标题行右侧放按钮。"""
-    outer = RoundedCard(parent)
+    outer = CardFrame(parent)
     inner = outer.content
     if title:
         head = ttk.Frame(inner, style="Card.TFrame")
-        head.pack(fill="x", pady=(0, 8))
+        head.pack(fill="x", pady=(0, 4))
         ttk.Label(head, text=title, style="Title.TLabel").pack(side="left")
         if header:
             header(head)
@@ -188,8 +235,8 @@ def card(parent, title: str = "", header=None):
 
 def info_box(parent, fonts: Fonts, mono: bool = False, wrap: int = 600) -> tk.Label:
     box = tk.Frame(parent, bg=C["stripe"], highlightthickness=0)
-    box.pack(fill="x", pady=(8, 8))
+    box.pack(fill="x", pady=4)
     lbl = tk.Label(box, text="", bg=C["stripe"], fg=C["text"], font=fonts.mono if mono else fonts.ui, anchor="w",
-                   justify="left", padx=14, pady=11, wraplength=wrap)
+                   justify="left", padx=8, pady=6, wraplength=wrap)
     lbl.pack(fill="x")
     return lbl

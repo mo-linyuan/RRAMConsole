@@ -6,7 +6,7 @@ import threading
 import time
 from dataclasses import dataclass
 from typing import Optional, Sequence
-from ..model.items import Item, PollItem, ProgItem, VerifyItem, WaitItem, hexs, total_frames
+from ..model.items import FpgaProbeItem, Item, PollItem, ProgItem, VerifyItem, WaitItem, hexs, total_frames
 from ..protocol import fpga, isa
 from ..protocol.pkg import Pkg, Route
 from ..transport.udp_link import UdpLink
@@ -30,6 +30,7 @@ class RunOptions:
     fast: bool = False
     chunk: int = fpga.MAX_FRAMES_PER_PACKET
     ready_wait_s: float = 1.0
+    download_gap_s: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,7 @@ class RunResult:
     planned: int
     elapsed_s: float
     summary: str
+    download_s: float = 0.0
 
 
 class Runner:
@@ -68,7 +70,9 @@ class Runner:
 
     def run(self, items, opt, rows):
         self._sent = self._total = 0
+        self._download_s = 0.0
         self._verified = self._execution_confirmed = False
+        self._fpga_checked = False
         self._estimated_wait_done = False
         t0, all_ok = time.monotonic(), True
         current = None
@@ -78,12 +82,14 @@ class Runner:
                 raise ValueError("任务为空或序列行号不完整")
             if not math.isfinite(opt.gap_s) or opt.gap_s < 0:
                 raise ValueError("发送间隔必须为非负有限数")
+            if not math.isfinite(opt.download_gap_s) or opt.download_gap_s < 0:
+                raise ValueError("写入间隔必须为非负有限数")
             if not math.isfinite(opt.ready_wait_s) or opt.ready_wait_s <= 0:
                 raise ValueError("Ready 查询超时必须为正有限数")
             # Validate every item before the first hardware write.
             for it in items:
                 it.validate()
-                it.frames(opt.route)
+                it.frames(opt.route, limit=1)
             self._total = total_frames(items)
             for it, row in zip(items, rows):
                 if self._stop.is_set():
@@ -94,7 +100,7 @@ class Runner:
                     self._execution_confirmed = False
                 self.ev.item_state(row, "运行中")
                 ok = self._run_item(it, opt)
-                state = ("已核对" if isinstance(it, VerifyItem) else "已确认" if isinstance(it, PollItem)
+                state = ("FPGA已核对" if isinstance(it, FpgaProbeItem) else "已核对" if isinstance(it, VerifyItem) else "已确认" if isinstance(it, PollItem)
                          else ("预计等待结束" if it.meta.get("estimated_execution") else "已等待") if isinstance(it, WaitItem) else "已发送")
                 self.ev.item_state(row, state if ok and not self._stop.is_set()
                                    else "已停止" if self._stop.is_set() else "失败")
@@ -117,11 +123,13 @@ class Runner:
                 outcome, summary = "checked", "步骤完成，指定数据核对通过；未确认芯片执行结束"
             elif self._estimated_wait_done:
                 outcome, summary = "sent", "已发送，预计等待结束；未读取芯片执行状态"
+            elif self._fpga_checked:
+                outcome, summary = "fpga_checked", "FPGA 命令暂存读回一致；芯片接收与器件选通尚未验证"
             else:
-                outcome, summary = "sent", "步骤完成；未确认芯片执行结束"
-            self.last_result = RunResult(outcome, self._sent, self._total, time.monotonic() - t0, summary)
-            self.ev.log("info" if all_ok else "err", "结果", "{} · 发出 {} 条，用时 {:.2f} s".format(
-                summary, self._sent, self.last_result.elapsed_s))
+                outcome, summary = "sent", "报文已发送"
+            self.last_result = RunResult(outcome, self._sent, self._total, time.monotonic() - t0, summary, self._download_s)
+            self.ev.log("info" if all_ok else "err", "结果", "{} · 发出 {} 条，软件总耗时 {:.3f} s，指令写入 {:.3f} s".format(
+                summary, self._sent, self.last_result.elapsed_s, self._download_s))
             callback = getattr(self.ev, "result", None)
             if callback:
                 callback(self.last_result)
@@ -130,6 +138,8 @@ class Runner:
         return all_ok
 
     def _run_item(self, it, opt):
+        if isinstance(it, FpgaProbeItem):
+            return self._probe_fpga(it, opt)
         if isinstance(it, WaitItem):
             if it.notify:
                 self.ev.log("info", "提示", it.notify)
@@ -145,6 +155,28 @@ class Runner:
         if isinstance(it, PollItem):
             return self._poll(it, opt)
         return self._send_simple(it, opt)
+
+    def _probe_fpga(self, it, opt):
+        if not self._ready(opt, it.desc):
+            return False
+        transmit, readback = it.frames(opt.route)
+        self.link.send(transmit[0], "FPGA自检：发送读 reg[8] 请求，不写 RRAM")
+        self._sent += 1
+        if self._pause(opt.gap_s):
+            return False
+        reply = self.link.request("fpga", readback[0], .6, "FPGA自检：回读地址 0003 暂存", cancel_event=self._stop,
+                                  reply_filter=lambda data: Pkg.decode(data).type not in range(8, 12))
+        self._sent += 1
+        if reply is None:
+            self.ev.log("err", "FPGA自检", "地址 0003 未回包，FPGA 命令暂存尚未验证")
+            return False
+        expected = transmit[0][4:]
+        if reply != expected:
+            self.ev.log("err", "FPGA自检", "暂存不一致：期望 {}，读到 {}".format(hexs(expected), hexs(reply)))
+            return False
+        self._fpga_checked = True
+        self.ev.log("ok", "FPGA自检", "地址 0003 暂存一致：{}；仅确认 FPGA 保存了 PKG，未确认芯片接收或器件选通".format(hexs(reply)))
+        return True
 
     def _ready(self, opt, what):
         if self._stop.is_set():
@@ -181,23 +213,53 @@ class Runner:
             else:
                 self.link.send(frame, it.desc)
                 self._sent += 1
-            self._stop.wait(opt.gap_s)
+            self._pause(opt.gap_s)
         return not self._stop.is_set()
 
     def _send_prog(self, it, opt):
         frames = [frame for frame, _ in it.frames(opt.route)]
         chunk = min(fpga.MAX_FRAMES_PER_PACKET, max(1, opt.chunk)) if opt.fast else 1
-        self.ev.log("info", "提示", "{}：{} 条，指令地址 0x{:04X} 起".format(it.desc, len(frames), it.start))
-        for j in range(0, len(frames), chunk):
-            if not self._ready(opt, "{} 第 {} 条".format(it.desc, j + 1)):
+        pause = max(.002, opt.download_gap_s) if chunk > 1 else opt.download_gap_s
+        batches = math.ceil(len(frames) / chunk)
+        self.ev.log("info", "写入指令", "{}：{} 条，指令地址 0x{:04X} 起；{} 个 UDP 包，包后等待 {:.3f} ms，"
+                    "写入间隔预算 {:.3f} s（另加 Ready 查询、通信和系统调度耗时）".format(
+                        it.desc, len(frames), it.start, batches, pause * 1000, batches * pause))
+        self.ev.log("info", "写入指令", "写入与芯片选通时间独立；界面显示首末报文，日志需手动保存")
+        started, sent, complete = time.monotonic(), 0, False
+        try:
+            for j in range(0, len(frames), chunk):
+                if not self._ready(opt, "{} 第 {} 条".format(it.desc, j + 1)):
+                    return False
+                part = frames[j:j + chunk]
+                edge = j == 0 or j + chunk >= len(frames)
+                self.link.send(b"".join(part), "写入首包" if j == 0 else "写入末包" if edge else "", quiet=not edge)
+                self._sent += len(part)
+                sent += len(part)
+                if chunk > 1 or j % 50 == 0 or j + chunk >= len(frames):
+                    self.ev.progress(self._sent, self._total)
+                if self._pause(pause):
+                    return False
+            complete = not self._stop.is_set()
+            return complete
+        finally:
+            elapsed = time.monotonic() - started
+            self._download_s += elapsed
+            self.ev.log("info" if complete else "err", "写入指令", "指令写入{}：{} / {} 条，实际指令写入耗时 {:.3f} s".format(
+                "完成" if complete else "中断", sent, len(frames), elapsed))
+
+    def _pause(self, seconds):
+        """Avoid Windows Event.wait's coarse timer; bound stop latency to 10ms.
+
+        Modern Python uses a high-resolution timer for sleep on Windows.
+        No busy-spin or process/global timer-resolution changes are needed.
+        """
+        deadline = time.monotonic() + seconds
+        while not self._stop.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 return False
-            part = frames[j:j + chunk]
-            self.link.send(b"".join(part), "", quiet=True)
-            self._sent += len(part)
-            if chunk > 1 or j % 50 == 0 or j + chunk >= len(frames):
-                self.ev.progress(self._sent, self._total)
-            self._stop.wait(0.002 if chunk > 1 else opt.gap_s)
-        return not self._stop.is_set()
+            time.sleep(min(remaining, .01))
+        return True
 
     def _chip_read(self, frame, note, timeout=0.6):
         reply = self.link.request("chip", frame, timeout, note, cancel_event=self._stop)

@@ -84,8 +84,9 @@ class UdpLink:
                     and (got.sx, got.sy, got.dx, got.dy) == (sent.dx, sent.dy, sent.sx, sent.sy))
         return matches
 
-    def request(self, expect, data, timeout, note="", quiet=False, cancel_event=None):
-        matcher = self._reply_matcher(expect, data)
+    def request(self, expect, data, timeout, note="", quiet=False, cancel_event=None, reply_filter=None):
+        base_matcher = self._reply_matcher(expect, data)
+        matcher = lambda reply: base_matcher(reply) and (reply_filter is None or reply_filter(reply))
         with self._requests:
             if cancel_event is not None and cancel_event.is_set():
                 return None

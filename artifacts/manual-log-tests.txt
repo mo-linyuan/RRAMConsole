@@ -1,0 +1,17 @@
+....................F...
+======================================================================
+FAIL: test_native_button_stops_all_three_phases_and_is_not_behind_logs (tests.test_stop_download.StopButtonTest.test_native_button_stops_all_three_phases_and_is_not_behind_logs) (phase='ready')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "D:\Project\RRAMConsole\tests\test_stop_download.py", line 85, in test_native_button_stops_all_three_phases_and_is_not_behind_logs
+    self.assertEqual(app.runner.last_result.outcome, "cancelled")
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 'failed' != 'cancelled'
+- failed
++ cancelled
+
+
+----------------------------------------------------------------------
+Ran 24 tests in 39.824s
+
+FAILED (failures=1)

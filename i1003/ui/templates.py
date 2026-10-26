@@ -10,7 +10,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from rram_console.hardware import RRAM_ARRAY
 
-from ..model.items import FpgaItem, Item, PkgItem, PollItem, ProgItem, RawItem, WaitItem
+from ..model.items import FpgaItem, Item, PkgItem, ProgItem, RawItem
 from ..protocol import fpga, isa
 from ..protocol.pkg import LABEL_TO_TYPE, TYPE_LABELS, PkgType
 
@@ -38,13 +38,22 @@ class Template:
 
     def make(self, values: Optional[Dict[str, str]] = None) -> Item:
         v = self.values(values)
+        for field in self.fields:
+            value = v[field.key]
+            if field.kind == "choice" and value not in field.options:
+                raise ValueError("{}：不支持的选项 {}".format(field.label, value))
+            if field.kind == "int":
+                number = int(value)
+                if not field.options[0] <= number <= field.options[1]:
+                    raise ValueError("{}必须为 {}～{}".format(field.label, *field.options))
         it = self.build(v)
+        it.validate()
         it.meta = {"tpl": self.name, "vals": v}
         return it
 
     def values(self, values=None):
         supplied = dict(values or {})
-        if self.name in ("写 WRITEB 指令", "批量写指令（long_tx）") and "dev" in supplied:
+        if self.name in ("写 WRITEB 指令", "写入 WRITEB 指令") and "dev" in supplied:
             address = hex_int(supplied.pop("dev"))
             if "row" not in supplied and "col" not in supplied:
                 # Preserve the exact address when reopening old raw-address templates.
@@ -118,7 +127,7 @@ TEMPLATES: List[Template] = [
              [Field("op", "操作", "choice", "读", ["读", "写 1", "写 0"])],
              lambda v: FpgaItem(desc="读接收使能", addr=fpga.Addr.RX_ENABLE) if v["op"] == "读" else
              FpgaItem(desc="写接收使能 = " + v["op"][-1], addr=fpga.Addr.RX_ENABLE, write=True, data=int(v["op"][-1])),
-             "FPGA 是否接收芯片输出（noc_in_ready），复位就是 1。同事给的“初始使能 0001”其实是读这一位。"),
+             "读写 FPGA 接收使能（noc_in_ready），复位值1；不控制 RRAM 器件选通。"),
     Template("boot_mode 0004", "板卡",
              [Field("op", "操作", "choice", "读", ["读", "写 1", "写 0"])],
              lambda v: FpgaItem(desc="读 boot_mode", addr=fpga.Addr.BOOT_MODE) if v["op"] == "读" else
@@ -131,30 +140,24 @@ TEMPLATES: List[Template] = [
               Field("base", "基时间", "int", 254, (0, 255))],
              lambda v: PkgItem(desc="写 reg[8] = {:08X}".format(_wwv(v).word), type=PkgType.WRITE_REG,
                                addr=isa.REG_WWV, data=_wwv(v).word),
-             "默认沿用师姐的 00FF_00FE：基时间 254、时间倍数 255、验证次数 0。",
+             "默认值 00FF_00FE：基时间 254、时间倍数 255、验证次数 0。",
              lambda v: "脉宽 = {} 周期 ≈ {:.3f} ms（10 MHz）".format(_wwv(v).cycles, _wwv(v).pulse_ms)),
     Template("读寄存器", "配置", [Field("reg", "寄存器", "choice", REG_CHOICES[5], REG_CHOICES)],
              lambda v: PkgItem(desc="读 reg[{}]".format(reg_no(v["reg"])), type=PkgType.READ_REG, addr=reg_no(v["reg"])),
-             "芯片的回包会自己出现在日志里（橙色）。"),
+             "需芯片支持寄存器读回；无回包会超时，不能用发送成功替代读回。"),
     Template("写寄存器", "配置",
              [Field("reg", "寄存器", "choice", REG_CHOICES[1], REG_CHOICES), Field("val", "写入值 HEX", "hex", "00000000")],
              lambda v: PkgItem(desc="写 reg[{}] = {:08X}".format(reg_no(v["reg"]), hex_int(v["val"])),
                                type=PkgType.WRITE_REG, addr=reg_no(v["reg"]), data=hex_int(v["val"]))),
-    Template("NI 节点使能（推断）", "配置", [],
-             lambda v: PkgItem(desc="NI reg[0] 节点使能", type=PkgType.WRITE_NI, addr=0, data=0x01000000),
-             "手册里 NI reg[0] 复位为 0，这条是推断的尝试，只改网络接口寄存器，不碰 RRAM。"),
     # ---- 指令
-    Template("写 WRITEB 指令", "指令", [Field("at", "存到指令地址 HEX", "hex", "0000")] + _CELL,
-             lambda v: PkgItem(desc="指令[{:04X}] WRITEB {:08X}".format(hex_int(v["at"]), _wb(v)),
-                               type=PkgType.WRITE_INST, addr=hex_int(v["at"]), data=_wb(v)),
-             "行、列均为 0～127。", lambda v: _cell_hint(v) + "\n指令字 = {:08X}".format(_wb(v))),
-    Template("批量写指令（long_tx）", "指令",
-             [Field("start", "起始指令地址 HEX", "hex", "0000"), Field("count", "条数（0x 开头为十六进制）", "count", "0x0FFF")]
+    Template("写入 WRITEB 指令", "指令",
+             [Field("start", "起始指令地址 HEX", "hex", "0000"), Field("count", "条数（0x 开头为十六进制）", "count", "1")]
              + _CELL + [Field("stop", "末尾加停止指令", "choice", "是", ["是", "否"])],
              lambda v: ProgItem(desc="批量 {:08X}".format(_wb(v)), start=hex_int(v["start"]),
                                 segs=[[_wb(v), count_int(v["count"])]], stop=v["stop"] == "是"),
-             "行、列均为 0～127。", lambda v: _cell_hint(v) + "\n指令 {:08X} 写到 0x{:04X} 起共 {} 条".format(_wb(v), hex_int(v["start"]), count_int(v["count"]))),
-    Template("写停止指令", "指令", [Field("at", "指令地址 HEX", "hex", "0FFF")],
+             "条数1为单条，大于1为重复写入；不会自动启动芯片。行列编码须与实际芯片接口匹配。",
+             lambda v: _cell_hint(v) + "\n指令 {:08X} 写到 0x{:04X} 起共 {} 条".format(_wb(v), hex_int(v["start"]), count_int(v["count"]))),
+    Template("写停止指令", "指令", [Field("at", "指令地址 HEX", "hex", "0001")],
              lambda v: PkgItem(desc="指令[{:04X}] 停止".format(hex_int(v["at"])), type=PkgType.WRITE_INST,
                                addr=hex_int(v["at"]), data=isa.STOP_INST),
              "CTRL 00000000 15 = 70F0_0000，放在最后一条指令后面。"),
@@ -164,11 +167,7 @@ TEMPLATES: List[Template] = [
     # ---- 运行
     Template("启动核", "运行", [],
              lambda v: PkgItem(desc="启动 reg[0]=1", type=PkgType.WRITE_REG, addr=isa.REG_STATUS, data=isa.START_VALUE),
-             "芯片开始执行指令区，可能真正写器件。运行前会弹窗确认。"),
-    Template("等待执行结束", "运行", [Field("s", "最长等待秒数", "int", 10, (1, 600))],
-             lambda v: PollItem(desc="确认执行结束", timeout_s=int(v["s"])), "反复读 reg[0]，直到出现结束位 0x80。"),
-    Template("等待", "运行", [Field("ms", "毫秒", "int", 1000, (0, 600000))],
-             lambda v: WaitItem(desc="等待", ms=int(v["ms"]))),
+             "向目标核发送启动指令，可能真正写器件；发送前请检查参数和接线。"),
     # ---- 自定义
     Template("自定义芯片报文", "自定义",
              [Field("type", "操作", "choice", TYPE_LABELS[PkgType.READ_REG], list(TYPE_LABELS.values())),
@@ -177,11 +176,18 @@ TEMPLATES: List[Template] = [
                                type=LABEL_TO_TYPE[v["type"]], addr=hex_int(v["addr"]), data=hex_int(v["data"]))),
     Template("原始 HEX", "自定义", [Field("hex", "整帧 HEX", "hex", "55 D5 00 02 00 00 00 00 00 00 00 00")],
              lambda v: RawItem(desc="原始报文", hex=" ".join("{:02X}".format(x) for x in bytes.fromhex(
-                 "".join(v["hex"].replace("0x", "").split())))),
-             "可以一次填多帧（12 字节的整数倍），会放在同一个 UDP 包里发出。"),
+                 "".join(v["hex"].replace("0x", "").replace("0X", "").split())))),
+             "原样发送十六进制字节，不校验芯片指令；多帧报文放在同一个UDP包中，不自动逐帧核对回包。"),
 ]
 
 BY_NAME: Dict[str, Template] = {t.name: t for t in TEMPLATES}
+BY_NAME["批量写入指令"] = BY_NAME["写入 WRITEB 指令"]
+BY_NAME["批量写指令（long_tx）"] = BY_NAME["写入 WRITEB 指令"]
+# Legacy single-word API/metadata stays readable, but is not another tree entry.
+BY_NAME["写 WRITEB 指令"] = Template("写 WRITEB 指令", "指令",
+    [Field("at", "存到指令地址 HEX", "hex", "0000")] + _CELL,
+    lambda v: PkgItem(desc="指令[{:04X}] WRITEB {:08X}".format(hex_int(v["at"]), _wb(v)),
+                      type=PkgType.WRITE_INST, addr=hex_int(v["at"]), data=_wb(v)))
 
 
 def groups() -> List[Tuple[str, List[Template]]]:

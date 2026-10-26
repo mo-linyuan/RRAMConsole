@@ -7,6 +7,20 @@ from i1003.ui.panels.quick_panel import duration_text
 
 
 class SelectionTimeTest(unittest.TestCase):
+    def test_download_interval_is_separate_from_selection_time(self):
+        result = plan(WriteTestSpec(repeat=4095, wwv_base=254, wwv_times=255))
+        self.assertAlmostEqual(result.nominal_selection_s, 26.523315)
+        self.assertAlmostEqual(result.download_gap_budget_s(.02), 81.92)
+        self.assertEqual(result.download_gap_budget_s(0), 0)
+        self.assertAlmostEqual(result.download_gap_budget_s(.001), 4.096)
+
+    def test_download_includes_stop_and_all_cells(self):
+        result = plan(WriteTestSpec(repeat=2, col_from=0, col_to=3))
+        self.assertAlmostEqual(result.download_gap_budget_s(.02), 9 * .02)
+        for gap in (-.01, float("nan"), float("inf")):
+            with self.subTest(gap=gap), self.assertRaises(ValueError):
+                result.download_gap_budget_s(gap)
+
     def test_one_cell_repeated_pulses(self):
         result = plan(WriteTestSpec(repeat=100, wwv_base=254, wwv_times=255))
         self.assertAlmostEqual(result.nominal_selection_s, .6477)

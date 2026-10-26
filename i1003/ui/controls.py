@@ -12,13 +12,23 @@ from tkinter import ttk
 def _photo(master, width, height, color, inside):
     """Small antialiased RGBA assets without a third-party imaging dependency."""
     rgb = bytes.fromhex(color.lstrip("#"))
+    # Color/state variants share their alpha geometry. Compute the expensive
+    # supersampled mask once per shape and DPI, not once per color.
+    cache = getattr(master, "_console_alpha_masks", None)
+    if cache is None:
+        cache = master._console_alpha_masks = {}
+    key = (width, height, inside)
+    mask = cache.get(key)
+    if mask is None:
+        mask = bytes(round(255 * sum(inside(x + (sx + .5) / 3, y + (sy + .5) / 3)
+                                    for sy in range(3) for sx in range(3)) / 9)
+                     for y in range(height) for x in range(width))
+        cache[key] = mask
     rows = bytearray()
     for y in range(height):
         rows.append(0)
         for x in range(width):
-            coverage = sum(inside(x + (sx + .5) / 3, y + (sy + .5) / 3)
-                           for sy in range(3) for sx in range(3))
-            rows.extend(rgb + bytes([round(255 * coverage / 9)]))
+            rows.extend(rgb + bytes([mask[y * width + x]]))
 
     def chunk(kind, data):
         return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
@@ -88,50 +98,18 @@ def apply_controls(style: ttk.Style, font, colors) -> None:
                                  border=border, sticky="nswe")
         root._console_control_images = images
 
-    if not hasattr(root, "_console_surface_images"):
-        images = []
-        w, h = round(44 * scale), round(28 * scale)
-        radius = 2 * scale
-
-        def rounded(x, y, inset=0):
-            cx = min(w - radius, max(radius, x))
-            cy = min(h - radius, max(radius, y))
-            return (inset <= x <= w-inset and inset <= y <= h-inset
-                    and math.hypot(x-cx, y-cy) <= radius-inset)
-
-        def surface(border, fill):
-            image = _photo(root, w, h, border, rounded)
-            inner = _photo(root, w, h, fill, lambda x, y: rounded(x, y, max(1, scale * .7)))
-            image.tk.call(str(image), "copy", str(inner), "-compositingrule", "overlay")
-            images.append(image)
-            return image
-
-        for name, palette in (
-            ("Button", ((line, panel), ("#9EB4D3", hover), (blue, selected),
-                        ("#E7ECF3", panel), (blue, panel))),
-            ("Primary", (("#2563EB", "#2563EB"), ("#3478F6", "#3478F6"), ("#1D4ED8", "#1D4ED8"),
-                         (line, selected), ("#A5C8FF", "#2563EB"))),
-        ):
-            normal, hover_image, pressed, disabled, focus = [surface(*pair) for pair in palette]
-            style.element_create("Console.{}.surface".format(name), "image", normal,
-                                 ("disabled", disabled), ("pressed", pressed), ("active", hover_image), ("focus", focus),
-                                 border=round(8*scale), sticky="nswe")
-        inactive = surface(panel, panel)
-        selected_tab = surface(blue, selected)
-        style.element_create("Console.Tab.surface", "image", inactive, ("selected", selected_tab),
-                             border=round(8*scale), sticky="nswe")
-        root._console_surface_images = images
-
-    for name, element in (("TButton", "Button"), ("Accent.TButton", "Primary")):
-        style.layout(name, [("Console.{}.surface".format(element), {"sticky": "nswe", "children": [
+    # Native borders/fills avoid stretching RGBA surfaces on every repaint.
+    # Small fixed-size arrows and green checkmarks retain their custom assets.
+    for name in ("TButton", "Accent.TButton"):
+        style.layout(name, [("Button.border", {"sticky": "nswe", "children": [
             ("Button.padding", {"sticky": "nswe", "children": [
                 ("Button.label", {"sticky": "nswe"})]})]})])
-    # Image corners must reveal the surface behind the button, not a solid blue widget rectangle.
-    style.configure("Accent.TButton", background=colors["card"])
-    style.map("Accent.TButton", background=[("!disabled", colors["card"]), ("disabled", colors["card"])])
-    style.configure("Toolbar.Accent.TButton", background=colors["bg"])
-    style.map("Toolbar.Accent.TButton", background=[("!disabled", colors["bg"]), ("disabled", colors["bg"])])
-    style.layout("Card.TNotebook.Tab", [("Console.Tab.surface", {"sticky": "nswe", "children": [
+    style.configure("Toolbar.Accent.TButton", background=blue)
+    style.map("Toolbar.Accent.TButton", background=[("active", colors["accent_d"]), ("disabled", selected)])
+    style.configure("Card.TNotebook.Tab", borderwidth=1, bordercolor=panel, lightcolor=panel, darkcolor=panel)
+    style.map("Card.TNotebook.Tab", background=[("selected", selected), ("!selected", panel)],
+              bordercolor=[("selected", blue), ("!selected", panel)])
+    style.layout("Card.TNotebook.Tab", [("Button.border", {"sticky": "nswe", "children": [
         ("Notebook.padding", {"sticky": "nswe", "children": [
             ("Notebook.label", {"sticky": "nswe"})]})]})])
 
@@ -153,11 +131,13 @@ def apply_controls(style: ttk.Style, font, colors) -> None:
                     return True
             return False
 
+        def inner_box(x, y):
+            return box((x / scale - 8) * 1.2 * scale + 8 * scale,
+                       (y / scale - 8) * 1.2 * scale + 8 * scale)
+
         def check_image(border, fill, tick=False):
             image = _photo(root, size, size, border, box)
-            inner = _photo(root, size, size, fill, lambda x, y: box(
-                (x / scale - 8) * 1.2 * scale + 8 * scale,
-                (y / scale - 8) * 1.2 * scale + 8 * scale))
+            inner = _photo(root, size, size, fill, inner_box)
             image.tk.call(str(image), "copy", str(inner), "-compositingrule", "overlay")
             if tick:
                 overlay = _photo(root, size, size, "#FFFFFF", mark)

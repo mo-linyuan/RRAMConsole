@@ -1,0 +1,17 @@
+{
+  "rows": 1000,
+  "simulation": true,
+  "hardware_commands_sent": 0,
+  "interval_edit": {
+    "median_ms": 50.585,
+    "max_ms": 60.609
+  },
+  "replace_one": {
+    "median_ms": 44.923,
+    "max_ms": 47.884
+  },
+  "refresh_all": {
+    "median_ms": 73.326,
+    "max_ms": 81.705
+  }
+}

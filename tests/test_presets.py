@@ -14,25 +14,34 @@ def repeat_of(items):
 
 
 class RepeatPresetTest(unittest.TestCase):
-    def test_variable_presets_read_current_count_each_time(self):
-        value = [7]
-        presets = _presets(lambda: value[0])
-        for count in (7, 13):
-            value[0] = count
-            for key in W.VARIABLE_REPEAT_SCENES:
-                self.assertEqual(repeat_of(presets[W.SCENE_LABELS[key]]()), count)
+    def test_default_device_operation_is_one_writeb_and_one_stop(self):
+        spec = W.WriteTestSpec()
+        self.assertEqual(spec.repeat, 1)
+        result = W.plan(spec)
+        self.assertEqual(result.instructions, 1)
+        self.assertEqual(next(item for item in result.items if isinstance(item, ProgItem)).count(), 2)
 
-    def test_single_and_row_presets_still_mean_one_per_cell(self):
-        presets = _presets(lambda: 37)
-        for key in W.SCENES:
-            if key not in W.VARIABLE_REPEAT_SCENES:
-                self.assertEqual(repeat_of(presets[W.SCENE_LABELS[key]]()), 1)
+    def test_visible_templates_and_summaries_do_not_include_legacy_source_names(self):
+        from i1003.ui.templates import TEMPLATES, BY_NAME
+        visible = list(W.SCENE_LABELS.values()) + list(W.SCENE_DESCRIPTIONS.values())
+        visible.append(W.plan(W.WriteTestSpec(op=W.OP_FORMING)).summary)
+        for template in TEMPLATES:
+            visible.extend((template.name, template.describe(template.defaults())))
+        for text in visible:
+            for phrase in ("师姐", "I1000", "实验台", "long_tx", "traversal"):
+                self.assertNotIn(phrase, text)
+        batch = BY_NAME["批量写入指令"]
+        self.assertEqual(batch.make().count(), 2)
+        self.assertIs(BY_NAME["批量写指令（long_tx）"], batch)
 
-    def test_invalid_counts_are_rejected(self):
-        key = W.SCENE_LABELS[next(iter(W.VARIABLE_REPEAT_SCENES))]
-        for count in (0, -1, "not a number", 8192):
-            with self.subTest(count=count), self.assertRaises(ValueError):
-                _presets(lambda: count)[key]()
+    def test_diagnostic_menu_does_not_duplicate_write_configuration(self):
+        presets = _presets()
+        self.assertEqual(len(presets), 2)
+        for name, factory in presets.items():
+            self.assertNotIn(name, W.SCENE_LABELS.values())
+            items = factory()
+            self.assertFalse(any(item.is_start() for item in items))
+            self.assertFalse(any(isinstance(item, ProgItem) for item in items))
 
     def test_invalid_preset_does_not_replace_existing_sequence(self):
         ctx = SimpleNamespace(items=[object()], set_items=Mock())

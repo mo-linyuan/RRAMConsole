@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import tkinter as tk
+from collections import deque
+import time
 from tkinter import filedialog, messagebox, ttk
 from typing import List
 
@@ -10,24 +12,12 @@ from ...model import sequence_io
 from ...model.items import Item
 from ...recipes import write_test
 from ..context import AppContext
-from ..theme import C, card
+from ..theme import C, card, bind_wrap
 
 
-def _presets(repeat_provider=None):
-    def build(name):
-        spec = write_test.scene(name)
-        if repeat_provider is not None and name in write_test.VARIABLE_REPEAT_SCENES:
-            try:
-                spec.repeat = int(repeat_provider())
-            except (TypeError, ValueError):
-                raise write_test.SpecError("请在上方填写有效的重复次数")
-        return write_test.plan(spec).items
-
-    out = {"板卡通信检查 · Ready / 接收使能": write_test.path_check,
-           "可选读回核对 · 需支持芯片回包": write_test.readback_check}
-    for name in write_test.SCENES:
-        out[write_test.SCENE_LABELS[name]] = (lambda n=name: build(n))
-    return out
+def _presets():
+    return {"板卡链路自检 · 不写 RRAM": write_test.path_check,
+            "可选读回核对 · 需支持芯片回包": write_test.readback_check}
 
 
 class SequencePanel:
@@ -35,25 +25,34 @@ class SequencePanel:
         self.ctx = ctx
         self.items: List[Item] = []
         self.states: List[str] = []
+        self._rendered_rows = {}
+        self._render_job = None
+        self._pending_rows = deque()
+        self._pending_set = set()
         self._busy = False
         self._edit_controls = []
         self.outer, inner = card(parent, "发送序列", header=self._header)
         self._build(inner)
+        self.outer.bind("<Destroy>", self._dispose_render, add="+")
 
     # ---------------------------------------------------------------- 界面
     def _header(self, head):
-        mb = ttk.Menubutton(head, text="载入测试步骤")
+        mb = ttk.Menubutton(head, text="诊断步骤")
         m = tk.Menu(mb, tearoff=0, font=self.ctx.fonts.ui, bg=C["card"], fg=C["text"],
                     activebackground=C["selected"], activeforeground=C["text"], bd=0, relief="flat")
-        m.add_command(label="仅载入序列，不会立即执行", state="disabled")
+        m.add_command(label="载入诊断序列，不会立即发送", state="disabled")
         m.add_separator()
-        for name, fn in _presets(lambda: self.ctx.quick.vars["repeat"].get()).items():
+        for name, fn in _presets().items():
             m.add_command(label=name, command=lambda n=name, f=fn: self._load_preset(n, f))
         mb["menu"] = m
         mb.pack(side="right")
         self._edit_controls.append(mb)
         ttk.Button(head, text="导出", command=self.export).pack(side="right", padx=6)
-        imp = ttk.Button(head, text="导入", command=self.import_)
+        imp = ttk.Menubutton(head, text="导入")
+        import_menu = tk.Menu(imp, tearoff=0, font=self.ctx.fonts.ui)
+        import_menu.add_command(label="替换当前序列…", command=self.import_)
+        import_menu.add_command(label="追加到序列末尾…", command=lambda: self.import_(append=True))
+        imp["menu"] = import_menu
         imp.pack(side="right")
         self._edit_controls.append(imp)
 
@@ -69,11 +68,11 @@ class SequencePanel:
         tv.tag_configure("start", foreground=C["warn"])
         tv.tag_configure("failed", foreground=C["err"])
         bottom = ttk.Frame(p, style="Card.TFrame")
-        bottom.pack(side="bottom", fill="x", pady=(10, 0))
+        bottom.pack(side="bottom", fill="x", pady=(6, 0))
         self.result_text = tk.StringVar(value="就绪")
         self.result_label = ttk.Label(bottom, textvariable=self.result_text, style="Sub.TLabel", wraplength=400)
-        self.result_label.pack(fill="x", pady=(0, 6))
-        self.result_label.bind("<Configure>", lambda event: self.result_label.configure(wraplength=max(100, event.width)))
+        self.result_label.pack(fill="x", pady=(0, 4))
+        bind_wrap(self.result_label)
         horizontal = ttk.Scrollbar(p, orient="horizontal", command=tv.xview)
         horizontal.pack(side="bottom", fill="x")
         sb = ttk.Scrollbar(p, orient="vertical", command=tv.yview)
@@ -84,29 +83,117 @@ class SequencePanel:
         tv.bind("<Delete>", lambda e: self.delete())
         self.tv = tv
 
-        edit = ttk.Frame(bottom, style="Card.TFrame")
-        edit.pack(fill="x", pady=(0, 8))
+        actions = ttk.Frame(bottom, style="Card.TFrame")
+        actions.pack(fill="x", pady=(0, 4))
+        edit = ttk.Frame(actions, style="Card.TFrame")
+        edit.pack(side="left")
+        run = ttk.Frame(actions, style="Card.TFrame")
+        run.pack(side="right")
         for txt, cmd in [("上移", lambda: self.move(-1)), ("下移", lambda: self.move(1)), ("删除", self.delete),
                          ("清空", self.clear)]:
             button = ttk.Button(edit, text=txt, command=cmd)
             button.pack(side="left", padx=(0, 6))
             self._edit_controls.append(button)
-        self.btn_stop = ttk.Button(bottom, text="停止发送", style="Danger.TButton", state="disabled",
+            if txt == "清空":
+                self.btn_clear = button
+        self.btn_stop = ttk.Button(run, text="停止任务", style="Danger.TButton",
                                    command=lambda: self.ctx.stop())
         self.btn_stop.pack(side="right")
-        self.btn_run = ttk.Button(bottom, text="运行全部", style="Accent.TButton", command=lambda: self.run(False))
+        self.btn_run = ttk.Button(run, text="运行全部", style="Accent.TButton", command=lambda: self.run(False))
         self.btn_run.pack(side="right", padx=6)
-        self.btn_sel = ttk.Button(bottom, text="运行选中", command=lambda: self.run(True))
+        self.btn_sel = ttk.Button(run, text="运行选中", command=lambda: self.run(True))
         self.btn_sel.pack(side="right")
         self.pb = ttk.Progressbar(bottom, length=110, mode="determinate")
-        self.pb.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        self.pb.pack(fill="x")
+        self._actions_stacked = None
+        def fit_actions(event):
+            stacked = event.width < edit.winfo_reqwidth() + run.winfo_reqwidth() + 12
+            if stacked == self._actions_stacked:
+                return
+            self._actions_stacked = stacked
+            edit.pack_forget()
+            run.pack_forget()
+            if stacked:
+                edit.pack(side="top", anchor="w", pady=(0, 4))
+                run.pack(side="top", anchor="e")
+            else:
+                edit.pack(side="left")
+                run.pack(side="right")
+        actions.bind("<Configure>", fit_actions)
 
     # ---------------------------------------------------------------- 数据
     def refresh(self, keep=None) -> None:
-        self.tv.delete(*self.tv.get_children())
-        route = self.ctx.route()
+        self._cancel_render()
         self.states = (self.states + [""] * len(self.items))[:len(self.items)]
-        for i, it in enumerate(self.items):
+        stale = [iid for iid in self.tv.get_children() if int(iid) >= len(self.items)]
+        if stale:
+            self.tv.delete(*stale)
+            for iid in stale:
+                self._rendered_rows.pop(iid, None)
+        self._render_rows(range(len(self.items)))
+        if keep is not None:
+            selected = [i for i in keep if 0 <= i < len(self.items)]
+            self._paint_rows([i for i in selected if not self.tv.exists(str(i))])
+            self.tv.selection_set([str(i) for i in selected])
+        self._update_buttons()
+
+    def _render_rows(self, indices):
+        indices = list(indices)
+        if len(indices) <= 1500:
+            self._paint_rows(indices)
+            return
+        for index in indices:
+            if index not in self._pending_set:
+                self._pending_rows.append(index)
+                self._pending_set.add(index)
+        if self._render_job is None:
+            self._update_buttons()
+            self._render_chunk()
+
+    @property
+    def rendering(self):
+        return self._render_job is not None or bool(self._pending_rows)
+
+    def _cancel_render(self):
+        if self._render_job is not None:
+            self.outer.after_cancel(self._render_job)
+            self._render_job = None
+        self._pending_rows.clear()
+        self._pending_set.clear()
+
+    def _dispose_render(self, event):
+        if event.widget == self.outer:
+            self._cancel_render()
+
+    def _render_chunk(self):
+        self._render_job = None
+        batch = []
+        while self._pending_rows and len(batch) < 200:
+            index = self._pending_rows.popleft()
+            self._pending_set.discard(index)
+            batch.append(index)
+        self._paint_rows(batch, budget_s=.004)
+        if self._pending_rows:
+            self._render_job = self.outer.after(16, self._render_chunk)
+        else:
+            self._update_buttons()
+
+    def _paint_rows(self, indices, budget_s=None):
+        route = self.ctx.route()
+        rows = []
+        existing = set(self.tv.get_children())
+        changed = {}
+        deadline = time.perf_counter() + budget_s if budget_s else None
+        for offset, i in enumerate(indices):
+            if offset and deadline is not None and time.perf_counter() >= deadline:
+                for remaining in reversed(indices[offset:]):
+                    if remaining not in self._pending_set:
+                        self._pending_rows.appendleft(remaining)
+                        self._pending_set.add(remaining)
+                break
+            if not 0 <= i < len(self.items):
+                continue
+            it = self.items[i]
             try:
                 fr = it.summary(route)
             except Exception:  # noqa: BLE001  内容有误时只影响显示
@@ -114,42 +201,69 @@ class SequencePanel:
             tags = (["odd"] if i % 2 else []) + (["start"] if it.is_start() else [])
             if self.states[i] == "失败":
                 tags = ["failed"]
-            self.tv.insert("", "end", iid=str(i), values=(i + 1, it.desc, fr, self.states[i]), tags=tags)
-        if keep:
-            self.tv.selection_set([str(i) for i in keep if 0 <= i < len(self.items)])
+            iid = str(i)
+            values, tags = (i + 1, it.desc, fr, self.states[i]), tuple(tags)
+            if iid in existing and self._rendered_rows.get(iid) == (values, tags):
+                continue
+            rows.append((iid, values, tags))
+            changed[iid] = (values, tags)
+        if rows:
+            # Rows remain Tcl list data (never interpolated script text). One
+            # call updates/inserts the batch while preserving selection/scroll.
+            self.tv.tk.call("apply", (("tree", "rows"), """
+                set inserted 0
+                foreach row $rows {
+                    set id [lindex $row 0]
+                    if {[$tree exists $id]} {
+                        $tree item $id -values [lindex $row 1] -tags [lindex $row 2]
+                    } else {
+                        $tree insert {} end -id $id -values [lindex $row 1] -tags [lindex $row 2]
+                        set inserted 1
+                    }
+                }
+                if {$inserted} { $tree children {} [lsort -integer [$tree children {}]] }
+            """), self.tv, tuple(rows))
+            self._rendered_rows.update(changed)
 
     def selected(self) -> List[int]:
         return sorted(int(i) for i in self.tv.selection())
 
     def add(self, it: Item) -> None:
-        if self._busy:
+        if self._busy or self.rendering:
             return
         sel = self.selected()
         pos = sel[-1] + 1 if sel else len(self.items)
         self.items.insert(pos, it)
         self.states.insert(pos, "")
-        self.refresh([pos])
+        self._render_rows(range(pos, len(self.items)))
+        if not self.tv.exists(str(pos)):
+            self._paint_rows([pos])
+        self.tv.selection_set(str(pos))
         self.tv.see(str(pos))
 
     def replace_selected(self, it: Item) -> bool:
-        if self._busy:
+        if self._busy or self.rendering:
             return False
         sel = self.selected()
         if len(sel) != 1:
             return False
         self.items[sel[0]] = it
         self.states[sel[0]] = ""
-        self.refresh(sel)
+        self._render_rows(sel)
         return True
 
     def set_items(self, items: List[Item]) -> None:
         if self._busy:
             return
         self.items, self.states = list(items), [""] * len(items)
-        self.refresh()
+        self._cancel_render()
+        self.tv.delete(*self.tv.get_children())
+        self._rendered_rows.clear()
+        self.refresh([])
+        self.tv.yview_moveto(0)
 
     def move(self, d: int) -> None:
-        if self._busy:
+        if self._busy or self.rendering:
             return
         idx = self.selected()
         if not idx or (d < 0 and idx[0] == 0) or (d > 0 and idx[-1] == len(self.items) - 1):
@@ -157,26 +271,27 @@ class SequencePanel:
         for i in (idx if d < 0 else reversed(idx)):
             self.items[i], self.items[i + d] = self.items[i + d], self.items[i]
             self.states[i], self.states[i + d] = self.states[i + d], self.states[i]
-        self.refresh([i + d for i in idx])
+        self._render_rows(sorted(set(idx) | {i + d for i in idx}))
+        self.tv.selection_set([str(i + d) for i in idx])
 
     def delete(self) -> None:
-        if self._busy:
+        if self._busy or self.rendering:
             return
         for i in reversed(self.selected()):
             del self.items[i]
             del self.states[i]
-        self.refresh()
+        self.refresh([])
 
     def clear(self) -> None:
         if self._busy:
             return
-        if self.items and messagebox.askyesno("清空序列", "确定清空全部 {} 条？".format(len(self.items))):
-            self.set_items([])
+        self.set_items([])
 
     def set_state(self, row, state: str) -> None:
         if row is None or not (0 <= row < len(self.items)):
             return
         self.states[row] = state
+        self._rendered_rows.pop(str(row), None)
         if self.tv.exists(str(row)):
             self.tv.set(str(row), "st", state)
             if state == "失败":
@@ -190,31 +305,39 @@ class SequencePanel:
         self.result_label.configure(foreground=C["sub"])
 
     def set_result(self, result):
-        self.result_text.set("{} · {} 条 · {:.2f} s".format(result.summary, result.sent, result.elapsed_s))
+        self.result_text.set("{} · {} 条 · 软件总耗时 {:.3f} s{}".format(result.summary, result.sent, result.elapsed_s,
+                             " · 指令写入 {:.3f} s".format(result.download_s) if getattr(result, "download_s", 0) else ""))
         color = "err" if result.outcome == "failed" else "warn" if result.outcome in ("cancelled", "sent") else "ok"
         self.result_label.configure(foreground=C[color])
 
     def set_busy(self, busy: bool) -> None:
         self._busy = busy
+        self._update_buttons()
+
+    def _update_buttons(self):
+        blocked = self._busy or self.rendering
         for b in (self.btn_run, self.btn_sel, *self._edit_controls):
-            b.config(state="disabled" if busy else "normal")
-        self.btn_stop.config(state="normal" if busy else "disabled")
+            disabled = blocked and not (b is self.btn_clear and not self._busy)
+            b.config(state="disabled" if disabled else "normal")
+        self.btn_stop.config(state="normal")
 
     # ---------------------------------------------------------------- 动作
     def run(self, selected: bool) -> None:
-        if self._busy:
+        if self._busy or self.rendering:
             return
         idx = self.selected() if selected else list(range(len(self.items)))
         if not idx:
-            messagebox.showinfo("提示", "先选中要运行的条目" if selected else "序列是空的")
+            self.ctx.log("info", "提示", "先选中要运行的条目" if selected else "序列是空的")
             return
         for i in idx:
             self.states[i] = ""
-        self.refresh(idx if selected else None)
+        # Admit the task before scheduling a large status repaint. Otherwise
+        # App.run would mistake this repaint for an unfinished list import.
         self.ctx.run([self.items[i] for i in idx], idx)
+        self.refresh(idx if selected else None)
 
     def _on_double(self, e) -> None:
-        if self._busy:
+        if self._busy or self.rendering:
             return
         row = self.tv.identify_row(e.y)
         if row:
@@ -228,14 +351,12 @@ class SequencePanel:
         except (TypeError, ValueError) as exc:
             messagebox.showerror("参数有误", str(exc))
             return
-        if self.items and not messagebox.askyesno("载入预设", "载入“{}”会替换当前序列，继续？".format(name)):
-            return
         self.set_items(items)
         self.ctx.log("info", "提示", "已载入预设：" + name)
 
     def export(self) -> None:
         if not self.items:
-            messagebox.showinfo("提示", "序列是空的")
+            self.ctx.log("info", "提示", "序列是空的")
             return
         path = filedialog.asksaveasfilename(defaultextension=".json", title="导出序列", filetypes=[
             ("调试台序列（推荐）", "*.json"), ("网络调试助手批量发送", "*.ini"), ("纯文本 HEX", "*.txt")])
@@ -258,7 +379,7 @@ class SequencePanel:
         except OSError as e:
             messagebox.showerror("导出失败", str(e))
 
-    def import_(self) -> None:
+    def import_(self, append=False) -> None:
         if self._busy:
             return
         path = filedialog.askopenfilename(title="导入序列", filetypes=[
@@ -276,7 +397,13 @@ class SequencePanel:
         except ValueError as exc:
             messagebox.showerror("芯片系列不匹配", str(exc))
             return
-        if self.items and messagebox.askyesno("导入", "追加到当前序列末尾？\n选“否”则替换当前序列。"):
+        def obsolete_wait(item):
+            return item.kind == "wait" and isinstance(item.meta, dict) and item.meta.get("estimated_execution", False)
+        automatic_waits = sum(obsolete_wait(item) for item in items)
+        if automatic_waits:
+            items = [item for item in items if not obsolete_wait(item)]
+            note = (note + "；" if note else "") + "已忽略旧版自动添加的预计执行等待 {} 项".format(automatic_waits)
+        if append:
             self.items.extend(items)
             self.states.extend([""] * len(items))
             self.refresh()

@@ -19,15 +19,134 @@ except Exception:  # noqa: BLE001
 
 @unittest.skipUnless(HAS_DISPLAY, "没有图形环境")
 class UiSmokeTest(unittest.TestCase):
+    def test_coordinate_fields_follow_scope_and_single_edits_stay_single(self):
+        from pathlib import Path
+        import i1003.ui.app as A
+        with tempfile.TemporaryDirectory() as folder, patch.object(A, "SETTINGS_FILE", str(Path(folder) / "settings.json")):
+            root = tk.Tk()
+            try:
+                app = A.App(root)
+                panel = app.quick
+                panel.scene_display.set("单个器件")
+                panel._select_scene()
+                visible = lambda key: bool(panel.coordinates[key].winfo_manager())
+                self.assertTrue(visible("row_from") and visible("col_from"))
+                for key in ("row_to_label", "row_to", "col_to_label", "col_to"):
+                    self.assertFalse(visible(key))
+                panel.coordinates["row_from"].set("12")
+                panel.coordinates["col_from"].set("37")
+                spec = panel.spec()
+                self.assertEqual((spec.row_from, spec.row_to, spec.col_from, spec.col_to), (12, 12, 37, 37))
+                self.assertEqual(panel.plan().cells, 1)
+                self.assertEqual(panel.scene_display.get(), "单个器件")
+                panel.vars["row_to"].set("127")  # Hidden stale values cannot broaden the operation.
+                panel.vars["col_to"].set("bad")
+                self.assertEqual(panel.plan().cells, 1)
+                panel.scene_display.set("一整行")
+                panel._select_scene()
+                self.assertTrue(visible("row_from"))
+                self.assertFalse(visible("col_from"))
+                self.assertTrue(panel.row_columns_hint.winfo_manager())
+                panel.coordinates["row_from"].set("9")
+                spec = panel.spec()
+                self.assertEqual((spec.row_from, spec.row_to, spec.col_from, spec.col_to), (9, 9, 0, 127))
+                self.assertEqual(panel.plan().cells, 128)
+                panel.scene_display.set("自定义范围")
+                panel._select_scene()
+                self.assertTrue(all(visible(key) for key in panel.coordinates))
+                panel.vars["row_to"].set("9")
+                panel.vars["col_to"].set("0")
+                self.assertEqual(panel.scene_display.get(), "自定义范围")
+                self.assertTrue(visible("row_to"))  # Editing equal endpoints must not hide the entry mid-typing.
+                panel.vars["row_to"].set("10")
+                panel.vars["col_to"].set("4")
+                self.assertEqual(panel.plan().cells, 10)
+                app._save_settings()
+                root.update_idletasks()
+            finally:
+                root.destroy()
+            root = tk.Tk()
+            try:
+                app = A.App(root)
+                self.assertEqual(app.quick.scene_display.get(), "自定义范围")
+                self.assertEqual(app.quick.plan().cells, 10)
+                root.update_idletasks()
+            finally:
+                root.destroy()
+
+    def test_scope_controls_and_combined_preview_preserve_parameters(self):
+        from pathlib import Path
+        import i1003.ui.app as A
+        from i1003.recipes import write_test as W
+        from i1003.model.items import ProgItem, FpgaProbeItem
+        with tempfile.TemporaryDirectory() as folder, patch.object(A, "SETTINGS_FILE", str(Path(folder) / "settings.json")):
+            root = tk.Tk()
+            try:
+                app = A.App(root)
+                app.quick.vars["op"].set(W.OP_FORMING)
+                app.quick.vars["repeat"].set("7")
+                app.quick.vars["wwv_base"].set("13")
+                for scope, expected in (("一整行", 896), ("单个器件", 7), ("自定义范围", 14)):
+                    app.quick.scene_display.set(scope)
+                    app.quick._select_scene()
+                    self.assertEqual(app.quick.plan().instructions, expected)
+                    self.assertEqual(app.quick.spec().op, W.OP_RESET)  # Same opcode, no external-experiment alias.
+                    self.assertEqual(app.quick.spec().repeat, 7)
+                    self.assertEqual(app.quick.spec().wwv_base, 13)
+                self.assertEqual(tuple(app.quick.scope_combo["values"]), ("单个器件", "一整行", "自定义范围"))
+                for item in (ProgItem(segs=[[0x40100002, 2], [0x40100003, 3]]), FpgaProbeItem()):
+                    app.templates.load(item)
+                    self.assertIsNone(app.templates.cur)
+                    self.assertTrue(all(button.instate(["disabled"]) for button in app.templates.actions))
+                app.templates.select("写入 WRITEB 指令")
+                self.assertTrue(all(not button.instate(["disabled"]) for button in app.templates.actions))
+                root.update_idletasks()
+            finally:
+                root.destroy()
+
+    def test_old_repeat_default_migrates_once_and_single_shot_label_tracks_edits(self):
+        import json
+        from pathlib import Path
+        import i1003.ui.app as A
+        from i1003.recipes import write_test as W
+        with tempfile.TemporaryDirectory() as folder, patch.object(A, "SETTINGS_FILE", str(Path(folder) / "settings.json")):
+            Path(A.SETTINGS_FILE).write_text(json.dumps({"quick.repeat": "4095", "quick.scene": "单器件只打一次",
+                "_extra": {"i1003.send_only_defaults_v1": True}}), encoding="utf-8")
+            root = tk.Tk()
+            try:
+                app = A.App(root)
+                self.assertEqual(app.quick.spec().repeat, 1)
+                self.assertEqual(app.quick.plan().instructions, 1)
+                app.quick.vars["repeat"].set("7")
+                self.assertEqual(app.quick.scene_display.get(), "单个器件")
+                app.quick.scene.set("单器件只打一次")
+                app.quick.apply_scene()
+                self.assertEqual(app.quick.spec().repeat, 1)
+                self.assertEqual(app.quick.scene_display.get(), "单个器件")
+                app.templates.select("批量写指令（long_tx）")
+                self.assertEqual(app.templates.lbl_name["text"], "写入 WRITEB 指令")
+                app.quick.vars["repeat"].set("4095")
+                app._save_settings()
+                root.update_idletasks()
+            finally:
+                root.destroy()
+            root = tk.Tk()
+            try:
+                app = A.App(root)
+                self.assertEqual(app.quick.spec().repeat, 4095)  # Explicit choice survives migration.
+                root.update_idletasks()
+            finally:
+                root.destroy()
+
     def test_old_readback_defaults_migrate_once(self):
         import json
         from pathlib import Path
         import i1003.ui.app as A
-        from i1003.ui.panels.quick_panel import AFTER
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "settings.json"
             path.write_text(json.dumps({"quick.check_reg8": True, "quick.check_inst": True,
-                                        "quick.poll_after": True, "quick.after": AFTER[0], "quick.repeat": "9"}), encoding="utf-8")
+                                        "quick.poll_after": True, "quick.after": "等待后查询结束状态",
+                                        "quick.remind_4200": True, "quick.repeat": "9"}), encoding="utf-8")
             with patch.object(A, "SETTINGS_FILE", str(path)):
                 root = tk.Tk()
                 root.withdraw()
@@ -37,8 +156,10 @@ class UiSmokeTest(unittest.TestCase):
                     self.assertFalse(spec.check_reg8 or spec.check_inst or spec.poll_after)
                     self.assertEqual(spec.repeat, 9)
                     self.assertTrue(app.route_bar.vars["ready"].get())
-                    app.quick.vars["check_reg8"].set(True)
-                    app.quick.after.set(AFTER[0])
+                    self.assertFalse(hasattr(app.quick, "after"))
+                    for removed in ("poll_after", "check_reg8", "check_inst", "remind_4200"):
+                        self.assertNotIn(removed, app.quick.vars)
+                    self.assertEqual([item.kind for item in app.quick.plan().items], ["pkg", "prog", "pkg"])
                     app._save_settings()
                 finally:
                     root.destroy()
@@ -46,8 +167,9 @@ class UiSmokeTest(unittest.TestCase):
                 root.withdraw()
                 try:
                     app = A.App(root)
-                    self.assertTrue(app.quick.spec().check_reg8)
-                    self.assertTrue(app.quick.spec().poll_after)
+                    self.assertFalse(app.quick.spec().check_reg8)
+                    self.assertFalse(app.quick.spec().poll_after)
+                    self.assertFalse(app.quick.spec().remind_4200)
                 finally:
                     root.destroy()
 
@@ -104,13 +226,7 @@ class UiSmokeTest(unittest.TestCase):
                     self.assertFalse(app.is_busy())
                     self.assertIn("核对通过", app.seq.result_text.get())
                     self.assertEqual(app.seq.states, ["已发送", "已核对", "已等待"])
-                    rows = [json.loads(line) for line in next(Path(directory).glob("*.jsonl")).read_text(encoding="utf-8").splitlines()]
-                    self.assertEqual(rows[0]["chip_family"], "i1003")
-                    self.assertEqual(len(rows[0]["sequence"]), 3)
-                    self.assertTrue(any(row["event"] == "rx" for row in rows))
-                    self.assertTrue(any(row["event"] == "tx" for row in rows))
-                    self.assertEqual(rows[-1]["event"], "finished")
-                    self.assertTrue(rows[-1]["ok"])
+                    self.assertEqual(list(Path(directory).glob("*.jsonl")), [])
                     self.assertIsNone(app._record)
                     self.assertEqual(str(app.route_bar.frame.winfo_children()[1]["state"]), "readonly")
                 finally:
@@ -162,6 +278,19 @@ class UiSmokeTest(unittest.TestCase):
             self.assertEqual(app.quick.plan().wwv.word, 0x00FF00FE)
             app.quick.vars["repeat"].set("100")
             self.assertEqual(app.quick.total_time_text.get(), "647.700 ms")
+            self.assertIn("写入等待预算 0.000 µs", app.quick.time_description.get())
+            app.route_bar.vars["download_gap"].set("20")
+            self.assertIn("写入等待预算 2.020000 s", app.quick.time_description.get())
+            app.route_bar.vars["gap"].set("1")
+            self.assertIn("写入等待预算 2.020000 s", app.quick.time_description.get())
+            app.route_bar.vars["download_gap"].set("1")
+            self.assertIn("写入等待预算 101.000 ms", app.quick.time_description.get())
+            self.assertEqual(app.quick.total_time_text.get(), "647.700 ms")
+            app.route_bar.vars["gap"].set("bad")
+            self.assertEqual(app.quick.total_time_text.get(), "—")
+            with self.assertRaises(ValueError):
+                app.route_bar.options()
+            app.route_bar.vars["gap"].set("20")
             app.quick.vars["col_to"].set("3")
             self.assertEqual(app.quick.total_time_text.get(), "1.295400 s")
             app.quick.vars["col_to"].set("2")
@@ -190,7 +319,7 @@ class UiSmokeTest(unittest.TestCase):
             app.templates.select("写 WRITEB 指令", {"dev": "3FFF"})
             self.assertEqual(app.templates.vars["row"].get(), "127")
             self.assertEqual(app.templates.vars["col"].get(), "127")
-            self.assertEqual(app.templates.build().data & 0xFFFF, 0x3FFF)
+            self.assertEqual(app.templates.build().segs[0][0] & 0xFFFF, 0x3FFF)
             app.templates.vars["row"].set("128")
             with self.assertRaises(ValueError):
                 app.templates.build()

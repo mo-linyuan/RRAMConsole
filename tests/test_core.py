@@ -158,7 +158,7 @@ class RunnerTest(unittest.TestCase):
         ok, ev, board = self._run(write_test.plan(spec).items, fast=False, chip_replies=False, port=9192)
         self.assertTrue(ok)
         self.assertEqual(len(board.inst), 6)
-        self.assertTrue(any("已发送，预计等待结束" in text for _, text in ev.logs))
+        self.assertTrue(any("报文已发送" in text for _, text in ev.logs))
         self.assertFalse(any("芯片执行完成" in text for _, text in ev.logs))
 
 

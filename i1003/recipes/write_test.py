@@ -1,6 +1,6 @@
 """RRAM 写测试配方：把"测哪些器件、怎么测"翻译成序列条目。
 
-对应 I1000 实验台流程：配 reg[8] → 读回 → 写指令（long_tx / traversal）→ 停止指令 → 启动 → 4200 run → 读 reg[0]。
+生成FPGA控制报文：配置reg[8]、写入指令（含STOP）、发送启动命令。
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from typing import Dict, List, Optional
 
 from rram_console.hardware import RRAM_ARRAY
 
-from ..model.items import Item, PkgItem, PollItem, ProgItem, VerifyItem, WaitItem, FpgaItem
+from ..model.items import Item, PkgItem, PollItem, ProgItem, VerifyItem, FpgaItem, FpgaProbeItem
 from ..protocol import fpga, isa
 from ..protocol.isa import CellEncoding, WwvConfig
 from ..protocol.pkg import PkgType
@@ -37,8 +37,8 @@ class WriteTestSpec:
     col_from: int = 2
     col_to: int = 2
     encoding: str = CellEncoding.ROW_X128
-    repeat: int = 4095
-    wwv_base: int = 254                 # 师姐实操参数：reg[8] = 00FF_00FE
+    repeat: int = 1
+    wwv_base: int = 254                 # reg[8] 默认值：00FF_00FE
     wwv_times: int = 255
     hold_s: float = 0.0                 # 兼容旧脚本；界面不再使用秒数反推次数
     pulse_ms: Optional[float] = None    # 兼容旧脚本；None 表示直接使用基时间和倍数
@@ -46,7 +46,7 @@ class WriteTestSpec:
     poll_after: bool = False
     check_reg8: bool = False
     check_inst: bool = False
-    remind_4200: bool = True
+    remind_4200: bool = False          # 兼容旧脚本参数；不再生成外部仪器提醒
 
     def to_dict(self) -> Dict:
         return asdict(self)
@@ -58,10 +58,10 @@ class WriteTestSpec:
 
 
 SCENES: Dict[str, WriteTestSpec] = {
-    "单器件长时间（I1000 实验台：4095 次）": WriteTestSpec(),
+    "单器件长时间（I1000 实验台：4095 次）": WriteTestSpec(repeat=4095),
     "单器件只打一次": WriteTestSpec(repeat=1),
     "一行遍历 128 个器件（I1000 traversal）": WriteTestSpec(col_from=0, col_to=RRAM_ARRAY.columns - 1, repeat=1),
-    "Forming 单器件（反向，4095 次）": WriteTestSpec(op=OP_FORMING, col_from=1, col_to=1),
+    "Forming 单器件（反向，4095 次）": WriteTestSpec(op=OP_FORMING, col_from=1, col_to=1, repeat=4095),
 }
 
 # Stable internal keys preserve old scripts/settings; these labels are shown in the UI.
@@ -109,6 +109,12 @@ class Plan:
     @property
     def per_cell_selection_s(self) -> float:
         return self.nominal_selection_s / self.cells
+
+    def download_gap_budget_s(self, gap_s: float) -> float:
+        """Explicit PC waits for WRITEB downloads plus STOP, excluding Ready/I/O."""
+        if not math.isfinite(gap_s) or gap_s < 0:
+            raise ValueError("发送间隔必须为非负有限数")
+        return (self.instructions + 1) * gap_s
 
 
 def plan(spec: WriteTestSpec) -> Plan:
@@ -162,11 +168,8 @@ def plan(spec: WriteTestSpec) -> Plan:
     if s.check_inst:
         items.append(VerifyItem(desc="核对指令[0000]", type=PkgType.READ_INST, addr=0, expect=segs[0][0]))
     items.append(PkgItem(desc="启动 reg[0]=1", type=PkgType.WRITE_REG, addr=isa.REG_STATUS, data=isa.START_VALUE))
-    items.append(WaitItem(desc="预计执行等待", meta={"estimated_execution": True}, ms=int(est * 1000) + 300,
-                          notify=("启动指令已发送，预计工作 {:.1f} s。需要的话现在去 4200 点 run。".format(est)
-                                  if s.remind_4200 else "")))
     if s.poll_after:
-        items.append(PollItem(desc="确认执行结束", timeout_s=10))
+        items.append(PollItem(desc="确认执行结束", timeout_s=max(10, est + 10)))
 
     summary = ("RRAM {} · {} · PE{} 阵列{} · {} · 每个重复 {} 次\n"
                "指令 {} 条 + 停止，占指令区 0x0000–0x{:04X}，首条指令字 {:08X}\n"
@@ -174,15 +177,15 @@ def plan(spec: WriteTestSpec) -> Plan:
                "reg[8] = {:08X} · 换算脉宽约 {:.3f} ms · 名义累计时间约 {:.3f} s").format(
         RRAM_ARRAY.label, opname, s.pe, s.array, where, repeat, n, n, segs[0][0], isa.CHIP_CLK_HZ / 1e6,
         wwv.base, wwv.times, wwv.cycles, wwv.word, wwv.pulse_ms, est)
-    if s.op == OP_FORMING:
-        summary += "\nForming 按 I1000 的做法用 RESET 类型指令，电压（SL 3.3V、WL 1.8V、BL 接地）由 4200 提供"
     return Plan(items, wwv, len(cells), n, segs[0][0], est, summary)
 
 
 def path_check(wwv: WwvConfig = None) -> List[Item]:
-    """Check FPGA communication only; no chip readback or register writes."""
+    """Read board state and verify its command staging; never write RRAM."""
     return [FpgaItem(desc="查询 Ready", addr=fpga.Addr.CHIP_READY),
-            FpgaItem(desc="读取 FPGA 接收使能", addr=fpga.Addr.RX_ENABLE)]
+            FpgaItem(desc="读取 FPGA 接收使能", addr=fpga.Addr.RX_ENABLE),
+            FpgaItem(desc="读取 boot_mode", addr=fpga.Addr.BOOT_MODE),
+            FpgaProbeItem(desc="FPGA发送寄存器自检")]
 
 
 def readback_check(wwv: WwvConfig = None) -> List[Item]:

@@ -9,7 +9,7 @@ import time
 import unittest
 
 from i1003.engine.runner import Runner, RunEvents, RunOptions
-from i1003.model.items import FpgaItem, PkgItem, PollItem, RawItem, VerifyItem, WaitItem
+from i1003.model.items import FpgaItem, FpgaProbeItem, PkgItem, PollItem, RawItem, VerifyItem, WaitItem, from_dict
 from i1003.protocol import fpga
 from i1003.protocol.pkg import Route, Pkg, encode
 from i1003.transport.udp_link import UdpLink
@@ -72,6 +72,58 @@ class Events(RunEvents):
 
 
 class ExecutionSafetyTest(unittest.TestCase):
+    def test_bulk_preview_limit_does_not_skip_validation_of_later_words(self):
+        from i1003.model.items import ProgItem
+        with peer(lambda data: []) as (link, received, _, _):
+            item = ProgItem(segs=[[0x40100002, 1], [0x48100002, 1]])  # PE8 is invalid.
+            ok, runner, _ = self.run_items(link, [item])
+            self.assertFalse(ok)
+            self.assertEqual(runner.last_result.sent, 0)
+            self.assertEqual(received, [])
+
+    def test_fpga_probe_succeeds_without_chip_reply(self):
+        saved = [bytes(8)]
+        def respond(data):
+            write, _, payload = fpga.parse_frame(data)
+            if write:
+                saved[0] = payload
+                return []
+            return [saved[0]]
+        with peer(respond) as (link, received, _, _):
+            ok, runner, _ = self.run_items(link, [FpgaProbeItem()])
+            self.assertTrue(ok)
+            self.assertEqual(runner.last_result.outcome, "fpga_checked")
+            self.assertIn("尚未验证", runner.last_result.summary)
+            self.assertEqual(Pkg.decode(received[0][4:]).type, 0)
+            self.assertEqual(len(received), 2)
+
+    def test_fpga_probe_detects_stale_or_wrong_staging(self):
+        with peer(lambda data: [] if fpga.parse_frame(data)[0] else [bytes(8)]) as (link, _, _, _):
+            ok, runner, events = self.run_items(link, [FpgaProbeItem()])
+            self.assertFalse(ok)
+            self.assertEqual(runner.last_result.outcome, "failed")
+            self.assertTrue(any("暂存不一致" in text for text in events.logs))
+
+    def test_fpga_probe_does_not_consume_chip_reply_as_saved_pkg(self):
+        saved = [bytes(8)]
+        chip_reply = [None]
+        def respond(data):
+            write, _, payload = fpga.parse_frame(data)
+            if write:
+                saved[0], chip_reply[0] = payload, reply_to(data, data=123)
+                return []
+            return [chip_reply[0], saved[0]]
+        with peer(respond) as (link, _, events, _):
+            ok, _, _ = self.run_items(link, [FpgaProbeItem()])
+            self.assertTrue(ok)
+            self.assertEqual([kind for kind, _ in events], ["unmatched", "fpga"])
+
+    def test_fpga_probe_json_roundtrip(self):
+        original = FpgaProbeItem(desc="FPGA staging")
+        restored = from_dict(original.to_dict())
+        self.assertEqual(restored.count(), 2)
+        self.assertEqual(restored.frames(R), original.frames(R))
+
     def test_default_scenes_do_not_generate_chip_readback(self):
         from i1003.recipes import write_test as W
         for name in W.SCENES:
@@ -135,10 +187,14 @@ class ExecutionSafetyTest(unittest.TestCase):
     def test_real_path_check_preset_executes_with_enum_address(self):
         from i1003.recipes.write_test import path_check
         registers = {}
+        last_out = [bytes(8)]
         def respond(data):
             write, addr, payload = fpga.parse_frame(data)
             if not write:
+                if addr == fpga.Addr.NOC_OUT:
+                    return [last_out[0]]
                 return [bytes(7) + b"\x01"]
+            last_out[0] = payload
             pkg = Pkg.decode(payload)
             if pkg.type == 4:
                 registers[pkg.addr] = pkg.data
@@ -147,10 +203,12 @@ class ExecutionSafetyTest(unittest.TestCase):
         with peer(respond) as (link, received, _, _):
             ok, runner, _ = self.run_items(link, path_check())
             self.assertTrue(ok)
-            self.assertEqual(runner.last_result.sent, 2)
+            self.assertEqual(runner.last_result.sent, 5)
             self.assertEqual(received[0], fpga.read_frame(fpga.Addr.CHIP_READY))
-            self.assertEqual(runner.last_result.outcome, "sent")
-            self.assertTrue(all(not fpga.parse_frame(data)[0] for data in received))
+            self.assertEqual(runner.last_result.outcome, "fpga_checked")
+            writes = [Pkg.decode(fpga.parse_frame(data)[2]) for data in received if fpga.parse_frame(data)[0]]
+            self.assertEqual(len(writes), 1)
+            self.assertEqual(writes[0].type, 0)
 
     def test_plain_chip_read_awaits_chip_reply(self):
         with peer(lambda data: [reply_to(data, data=7)]) as (link, _, events, _):
@@ -249,7 +307,7 @@ class ExecutionSafetyTest(unittest.TestCase):
             ok, runner, _ = self.run_items(link, [PkgItem(type=4, addr=8, data=1)])
             self.assertTrue(ok)
             self.assertEqual(runner.last_result.outcome, "sent")
-            self.assertIn("未确认", runner.last_result.summary)
+            self.assertEqual(runner.last_result.summary, "报文已发送")
 
     def test_jsonl_record_preserves_full_packets_and_results(self):
         with tempfile.TemporaryDirectory() as directory:

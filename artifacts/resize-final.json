@@ -1,0 +1,101 @@
+{
+  "window": {
+    "median_ms": 152.567,
+    "p95_ms": 445.849,
+    "max_ms": 642.011,
+    "frames": 12
+  },
+  "workspace_sash": {
+    "median_ms": 61.86,
+    "p95_ms": 74.719,
+    "max_ms": 162.102,
+    "frames": 12
+  },
+  "log_sash": {
+    "median_ms": 68.715,
+    "p95_ms": 74.59,
+    "max_ms": 82.479,
+    "frames": 12
+  },
+  "preview_drag": {
+    "median_ms": 0.771,
+    "p95_ms": 1.149,
+    "max_ms": 2.251,
+    "frames": 12,
+    "release_ms": 58.449
+  },
+  "template_sash": {
+    "median_ms": 40.136,
+    "p95_ms": 44.047,
+    "max_ms": 47.213,
+    "frames": 12
+  },
+  "callbacks": [
+    {
+      "file": "theme.py",
+      "function": "apply",
+      "calls": 78,
+      "cumulative_ms": 17.361
+    },
+    {
+      "file": "sequence_panel.py",
+      "function": "fit_actions",
+      "calls": 29,
+      "cumulative_ms": 8.588
+    },
+    {
+      "file": "app.py",
+      "function": "_pump",
+      "calls": 69,
+      "cumulative_ms": 5.539
+    },
+    {
+      "file": "theme.py",
+      "function": "resize",
+      "calls": 78,
+      "cumulative_ms": 2.342
+    },
+    {
+      "file": "theme.py",
+      "function": "_fit_content",
+      "calls": 50,
+      "cumulative_ms": 2.002
+    },
+    {
+      "file": "theme.py",
+      "function": "_update_region",
+      "calls": 21,
+      "cumulative_ms": 1.107
+    },
+    {
+      "file": "theme.py",
+      "function": "_scroll_state",
+      "calls": 50,
+      "cumulative_ms": 1.049
+    },
+    {
+      "file": "split_pane.py",
+      "function": "_move_drag",
+      "calls": 12,
+      "cumulative_ms": 0.377
+    },
+    {
+      "file": "app.py",
+      "function": "_fit_header",
+      "calls": 12,
+      "cumulative_ms": 0.274
+    },
+    {
+      "file": "split_pane.py",
+      "function": "_show_preview",
+      "calls": 12,
+      "cumulative_ms": 0.267
+    },
+    {
+      "file": "app.py",
+      "function": "flush_logs",
+      "calls": 69,
+      "cumulative_ms": 0.034
+    }
+  ]
+}

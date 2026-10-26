@@ -19,7 +19,7 @@ class AppContext:
     def chip_family_id(self) -> str: raise NotImplementedError
 
     def run(self, items: Sequence[Item], rows: Optional[Sequence[Optional[int]]] = None,
-            confirm: bool = True) -> bool:
+            confirm: bool = False) -> bool:
         raise NotImplementedError
 
     def stop(self) -> None: raise NotImplementedError
