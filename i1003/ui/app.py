@@ -473,9 +473,9 @@ class App(AppContext):
         probe = getattr(self.backend, "probe_link", None)
         if probe is not None and not getattr(self.link, "is_simulation", False):
             ok, detail = probe(self.link)
-            self.conn.set_link_state(ok, detail)
-            if not ok:
-                self.log("err", "连接探测", detail)
+            self.conn.set_link_state(ok)
+            if detail:
+                self.log("err" if not ok else "info", "连接探测", detail)
         self.chip_selector.set_locked(True)
         self.log("info", "提示", description)
 

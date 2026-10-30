@@ -81,14 +81,10 @@ class ConnectionBar:
         else:
             self.lbl_status.pack_forget()
 
-    def set_link_state(self, ok: bool, detail: str = "") -> None:
-        """The LED reflects a real probe answer, not just a successful local bind."""
-        if ok:
-            text = "●  UDP 已打开" + ("（{}）".format(detail) if detail else "")
-            self.lbl_state.configure(text=text, fg=C["warn"] if detail else C["ok"])
-        else:
-            self.lbl_state.configure(text="●  未连通（{}）".format(detail) if detail else "●  未连通",
-                                     fg=C["err"])
+    def set_link_state(self, ok: bool) -> None:
+        """The LED stays short; the long explanation belongs in the log, not the toolbar."""
+        self.lbl_state.configure(text="●  UDP 已打开" if ok else "●  未连通",
+                                 fg=C["ok"] if ok else C["err"])
 
 
 class RouteBar:
