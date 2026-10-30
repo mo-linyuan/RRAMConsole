@@ -167,6 +167,37 @@ class ExecutionSafetyTest(unittest.TestCase):
             self.assertEqual([kind for kind, _ in events], ["bit", "bit"])
             self.assertEqual(received[0], received[1])
 
+    def test_probe_link_reports_wire_truth_not_local_bind(self):
+        from rram_console.chips.i1003 import I1003Backend
+        backend = I1003Backend()
+        with peer(lambda data: [bytes(7) + b"\x01"]) as (link, received, _, _):
+            ok, detail = backend.probe_link(link)
+            self.assertTrue(ok)
+            self.assertEqual(detail, "")
+        with peer(lambda data: []) as (link, received, _, _):
+            ok, detail = backend.probe_link(link)
+            self.assertFalse(ok)
+            self.assertIn("无回包", detail)
+            self.assertIn("重新连接", detail)
+
+    def test_raw_reply_timeout_does_not_fail_or_block_following_items(self):
+        # A raw staging write whose payload decodes as a chip READ (TYPE<4)
+        # must report the silence and continue, not abort the task.
+        raw = RawItem(desc="原始报文", hex=fpga.chip_frame(encode(0, 8, 0, R)).hex())
+        follow = PkgItem(type=4, addr=8, data=0x00FF00FE)
+        with peer(lambda data: []) as (link, received, rx_kinds, _):
+            ok, runner, events = self.run_items(link, [raw, follow])
+            self.assertTrue(ok)
+            self.assertEqual(runner.last_result.outcome, "sent")
+            self.assertEqual(runner.last_result.sent, 2)
+            self.assertIn((0, "已发送"), events.states)
+            self.assertIn((1, "已发送"), events.states)
+            deadline = time.monotonic() + 1  # drain: the last sendto may still be in flight
+            while len(received) < 2 and time.monotonic() < deadline:
+                time.sleep(.02)
+            self.assertEqual(len(received), 2)
+            self.assertTrue(any("未等到匹配回包" in text for text in events.logs))
+
     def test_board_templates_accept_builtin_address_enums(self):
         from i1003.ui.templates import TEMPLATES
         for template in (t for t in TEMPLATES if t.group == "板卡"):

@@ -470,6 +470,12 @@ class App(AppContext):
             return
         self.conn.set_connected(True)
         self.root.title(APP_NAME + (" · 离线模拟" if getattr(self.link, "is_simulation", False) else ""))
+        probe = getattr(self.backend, "probe_link", None)
+        if probe is not None and not getattr(self.link, "is_simulation", False):
+            ok, detail = probe(self.link)
+            self.conn.set_link_state(ok, detail)
+            if not ok:
+                self.log("err", "连接探测", detail)
         self.chip_selector.set_locked(True)
         self.log("info", "提示", description)
 

@@ -81,6 +81,15 @@ class ConnectionBar:
         else:
             self.lbl_status.pack_forget()
 
+    def set_link_state(self, ok: bool, detail: str = "") -> None:
+        """The LED reflects a real probe answer, not just a successful local bind."""
+        if ok:
+            text = "●  UDP 已打开" + ("（{}）".format(detail) if detail else "")
+            self.lbl_state.configure(text=text, fg=C["warn"] if detail else C["ok"])
+        else:
+            self.lbl_state.configure(text="●  未连通（{}）".format(detail) if detail else "●  未连通",
+                                     fg=C["err"])
+
 
 class RouteBar:
     def __init__(self, parent, on_route_changed: Callable[[], None]):

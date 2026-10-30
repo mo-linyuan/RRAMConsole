@@ -1,4 +1,4 @@
-﻿"""Sequence execution with explicit outcomes and fail-fast readback checks."""
+"""Sequence execution with explicit outcomes and fail-fast readback checks."""
 from __future__ import annotations
 import copy
 import math
@@ -6,7 +6,7 @@ import threading
 import time
 from dataclasses import dataclass
 from typing import Optional, Sequence
-from ..model.items import FpgaProbeItem, Item, PollItem, ProgItem, VerifyItem, WaitItem, hexs, total_frames
+from ..model.items import FpgaProbeItem, Item, PollItem, ProgItem, RawItem, VerifyItem, WaitItem, hexs, total_frames
 from ..protocol import fpga, isa
 from ..protocol.pkg import Pkg, Route
 from ..transport.udp_link import UdpLink
@@ -160,11 +160,11 @@ class Runner:
         if not self._ready(opt, it.desc):
             return False
         transmit, readback = it.frames(opt.route)
-        self.link.send(transmit[0], "FPGA自检：发送读 reg[8] 请求，不写 RRAM")
+        self.link.send(transmit[0], "读 reg[8] 请求（不写 RRAM）")
         self._sent += 1
         if self._pause(opt.gap_s):
             return False
-        reply = self.link.request("fpga", readback[0], .6, "FPGA自检：回读地址 0003 暂存", cancel_event=self._stop,
+        reply = self.link.request("fpga", readback[0], .6, "回读 0003 暂存", cancel_event=self._stop,
                                   reply_filter=lambda data: Pkg.decode(data).type not in range(8, 12))
         self._sent += 1
         if reply is None:
@@ -175,7 +175,7 @@ class Runner:
             self.ev.log("err", "FPGA自检", "暂存不一致：期望 {}，读到 {}".format(hexs(expected), hexs(reply)))
             return False
         self._fpga_checked = True
-        self.ev.log("ok", "FPGA自检", "地址 0003 暂存一致：{}；仅确认 FPGA 保存了 PKG，未确认芯片接收或器件选通".format(hexs(reply)))
+        self.ev.log("ok", "FPGA自检", "地址 0003 暂存一致；仅确认 FPGA 保存了 PKG，未确认芯片接收或器件选通")
         return True
 
     def _ready(self, opt, what):
@@ -207,9 +207,17 @@ class Runner:
                 reply = self.link.request(expect, frame, 0.6, it.desc, cancel_event=self._stop)
                 self._sent += 1
                 if reply is None:
-                    if not self._stop.is_set():
+                    if self._stop.is_set():
+                        return False
+                    if isinstance(it, RawItem):
+                        # Raw frames are the manual probe channel: a silent chip is
+                        # a finding to observe, not a task failure. The wait stays,
+                        # so a late reply can never be mis-paired with the next read.
+                        self.ev.log("info", "提示", "{}：未等到匹配回包（原始报文不判失败，继续后续步骤）；"
+                                    "如需失败即停的核对，请改用读类模板".format(it.desc))
+                    else:
                         self.ev.log("err", "错误", "{}：没有匹配的回包，停止后续步骤".format(it.desc))
-                    return False
+                        return False
             else:
                 self.link.send(frame, it.desc)
                 self._sent += 1

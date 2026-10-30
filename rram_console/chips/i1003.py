@@ -47,6 +47,16 @@ class I1003Backend:
         link.open(lip, lport, rip, rport)
         return "UDP 已打开 {}:{} → {}:{}".format(lip, lport, rip, rport)
 
+    def probe_link(self, link):
+        """One Ready query right after open: a local UDP bind proves nothing about the wire."""
+        from i1003.protocol import fpga
+        value = link.read_bit(fpga.Addr.CHIP_READY, "连接探测", timeout=.5)
+        if value is None:
+            return False, "Ready 无回包 · 检查网线、板卡供电或本机 IP；socket 保持打开，重新连接可再次探测"
+        if value == 1:
+            return True, ""
+        return True, "Ready=0 · 链路已通，芯片未就绪"
+
     connection_hint = ("常见原因：网络调试助手还开着，占用了本地端口；"
                        "或者本机 IP 不是这台电脑网卡的地址（FPGA 的回包固定发往 192.168.1.9:8080）。")
 
@@ -83,7 +93,7 @@ class I1003Backend:
         if kind == "bit":
             return "recv", "接收", "{}    值={}".format(preview, data[7] & 1)
         if kind == "fpga":
-            return "recv", "接收", "{}    FPGA 读回数据（不是芯片回包）".format(preview)
+            return "recv", "接收", preview
         if kind == "foreign":
             return "info", "忽略", "{}    来自非目标板卡的 UDP 包，未用于核对".format(preview)
         if kind == "unmatched":
